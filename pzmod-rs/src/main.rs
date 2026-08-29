@@ -796,9 +796,42 @@ fn folder_status_at(mods: &Path, off: &Path, folder: &str) -> &'static str {
     }
 }
 
+/// Steam drops `browsesort` on the floor unless a time window comes with it:
+/// ask for "most subscribed" with no `days` and it hands back the trending list,
+/// which is why every filter looked dead. `mostrecent` is the one sort that
+/// takes no window.
+fn sort_days(browse_sort: &str) -> Option<&'static str> {
+    match browse_sort {
+        "trend" => Some("7"),
+        "totaluniquesubscriptions" => Some("3650"),
+        _ => None,
+    }
+}
+
+/// Steam pins its own "Modding Policy" notice to the top of every listing, tag
+/// filter or not, so the tags are checked again against the metadata.
+fn has_tags(item: &Value, wanted: &[String]) -> bool {
+    if wanted.is_empty() {
+        return true;
+    }
+    let on_item: HashSet<&str> = item
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tag| tag.get("tag").and_then(Value::as_str))
+        .collect();
+    wanted.iter().all(|tag| on_item.contains(tag.as_str()))
+}
+
 #[tauri::command]
 fn browse(q: String, sort: String, page: u32, tags: Vec<String>) -> Result<Value, String> {
     let page = page.clamp(1, 50);
+    let wanted: Vec<String> = tags
+        .iter()
+        .filter(|tag| TAGS.contains(&tag.as_str()))
+        .cloned()
+        .collect();
     let ids = if let Some(id) = maybe_id(&q) {
         if details(std::slice::from_ref(&id))?.contains_key(&id) {
             vec![id]
@@ -821,13 +854,13 @@ fn browse(q: String, sort: String, page: u32, tags: Vec<String>) -> Result<Value
         if !q.is_empty() {
             fields.push(("searchtext".into(), q));
         }
-        if sort == "trend" {
-            fields.push(("days".into(), "7".into()));
+        if let Some(days) = sort_days(browse_sort) {
+            fields.push(("days".into(), days.into()));
         }
         fields.extend(
-            tags.into_iter()
-                .filter(|tag| TAGS.contains(&tag.as_str()))
-                .map(|tag| ("requiredtags[]".into(), tag)),
+            wanted
+                .iter()
+                .map(|tag| ("requiredtags[]".into(), tag.clone())),
         );
         let html = cached_page(&(BROWSE_URL.to_string() + &form_body(&fields)), BROWSE_TTL)
             .map_err(|error| error.to_string())?;
@@ -837,7 +870,9 @@ fn browse(q: String, sort: String, page: u32, tags: Vec<String>) -> Result<Value
     let metadata = details(&ids)?;
     let items: Vec<Value> = ids
         .iter()
-        .filter_map(|id| metadata.get(id).map(card))
+        .filter_map(|id| metadata.get(id))
+        .filter(|item| has_tags(item, &wanted))
+        .map(card)
         .collect();
     Ok(json!({"items": items, "page": page}))
 }
@@ -2099,6 +2134,25 @@ mod tests {
             "retired folder is loose, not deleted"
         );
         fs::remove_dir_all(user).ok();
+    }
+
+    #[test]
+    fn every_sort_but_mostrecent_carries_a_time_window() {
+        assert_eq!(sort_days("trend"), Some("7"));
+        assert_eq!(sort_days("totaluniquesubscriptions"), Some("3650"));
+        assert_eq!(sort_days("mostrecent"), None);
+    }
+
+    #[test]
+    fn tag_filter_drops_the_pinned_notice() {
+        let pinned = json!({"tags": [{"tag": "Modding or Configuration"}]});
+        let car = json!({"tags": [{"tag": "Build 42"}, {"tag": "Vehicles"}]});
+        let wanted = vec!["Vehicles".to_string()];
+        assert!(!has_tags(&pinned, &wanted));
+        assert!(has_tags(&car, &wanted));
+        assert!(has_tags(&pinned, &[]));
+        // every requested tag has to be present, not just one of them
+        assert!(!has_tags(&car, &["Vehicles".into(), "Map".into()]));
     }
 
     #[test]

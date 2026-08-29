@@ -147,8 +147,13 @@ def card(d):
 def listing(q, sort, page, tags):
     ids = pzmod.browse(q, sort, page, tags)
     meta = pzmod.details(ids)
+    # Steam pins its own "Modding Policy" notice to the top of every listing,
+    # tag filter or not. Drop anything that lacks the tags that were asked for.
+    want = set(tags)
+    def keeps(item):
+        return want <= {t.get("tag") for t in item.get("tags", [])}
     # Steam's own ordering is the useful one; details() comes back unordered.
-    return [card(meta[i]) for i in ids if i in meta]
+    return [card(meta[i]) for i in ids if i in meta and keeps(meta[i])]
 
 
 def detail(wid):

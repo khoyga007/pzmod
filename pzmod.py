@@ -45,6 +45,10 @@ UA = {"User-Agent": "Mozilla/5.0 (pzmod)"}
 SORTS = {"trend": "Thịnh hành tuần", "totaluniquesubscriptions": "Nhiều sub nhất",
          "mostrecent": "Mới nhất", "textsearch": "Khớp từ khoá"}
 
+# Steam bỏ qua browsesort nếu thiếu days: hỏi "nhiều sub nhất" mà không kèm cửa
+# sổ thời gian thì nó trả về đúng danh sách trending, nên bộ lọc trông như chết.
+SORT_DAYS = {"trend": "7", "totaluniquesubscriptions": "3650"}
+
 TAGS = ["Build 40", "Build 41", "Build 42", "Animals", "Audio", "Balance",
         "Building", "Clothing/Armor", "Farming", "Food", "Framework", "Hardmode",
         "Interface", "Items", "Language/Translation", "Literature", "Map", "Military",
@@ -568,12 +572,13 @@ def browse(query="", sort="trend", page=1, tags=()):
     wid = maybe_id(query)
     if wid:
         return [wid] if details([wid]) else []
+    browse_sort = "textsearch" if query else sort
     fields = [("appid", APPID), ("section", "readytouseitems"),
-              ("browsesort", "textsearch" if query else sort), ("p", str(page))]
+              ("browsesort", browse_sort), ("p", str(page))]
     if query:
         fields.append(("searchtext", query))
-    if sort == "trend":
-        fields.append(("days", "7"))
+    if browse_sort in SORT_DAYS:
+        fields.append(("days", SORT_DAYS[browse_sort]))
     fields.extend(("requiredtags[]", tag) for tag in tags)
     html = cached_page(BROWSE + urllib.parse.urlencode(fields))
     ids, seen = [], set()
