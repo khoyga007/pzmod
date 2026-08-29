@@ -502,7 +502,10 @@ fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
         return Ok(html);
     }
     let _guard = ForegroundGuard::new();
-    fetch_page(url, true)
+    // Steam chặn -> dùng lại bản cache cũ thay vì bó tay, y như lane Python
+    // (pzmod.py cached_page). Mục "Required Items" của một mod gần như không đổi,
+    // bản cũ vẫn dò được phụ thuộc; hết cách mới trả lỗi.
+    fetch_page(url, true).or_else(|blocked| cached(url, None).ok_or(blocked))
 }
 
 fn ids_after(html: &str, marker: &str) -> Vec<String> {
@@ -1867,7 +1870,9 @@ fn walk_dependencies(
                     walk_dependencies(&dependency, depth - 1, seen, order, log);
                 }
             }
-            Err(error) => log.push(format!("! {id}: không dò được mod bắt buộc ({error})")),
+            Err(error) => log.push(format!(
+                "~ {id}: chưa kiểm được mod bắt buộc ({error}) - vẫn cài tiếp"
+            )),
         }
     }
     order.push(id.to_string());
@@ -3249,7 +3254,9 @@ mod tests {
         let prev_user = std::env::var_os("PZ_USER");
         std::env::set_var("PZ_USER", &user);
 
-        let url = "https://example.invalid/listing_test";
+        // Cổng 1 trên loopback: refuse ngay, không chờ DNS timeout như
+        // một host .invalid (test case 5 cần một lần fetch hỏng thật).
+        let url = "http://127.0.0.1:1/listing_test";
         let cpath = cache_path(url);
         fs::create_dir_all(cpath.parent().unwrap()).unwrap();
 
@@ -3270,6 +3277,10 @@ mod tests {
         // 4. Valid listing in stale cache -> cached_listing serves it (SWR)
         fs::write(&cpath, good_html).unwrap();
         assert_eq!(cached(url, None).as_deref(), Some(good_html));
+
+        // 5. TTL expired + refresh impossible (nothing listening) ->
+        //    cached_page still serves the stale copy instead of failing.
+        assert_eq!(cached_page(url, Duration::ZERO).unwrap(), good_html);
 
         if let Some(prev) = prev_user {
             std::env::set_var("PZ_USER", prev);

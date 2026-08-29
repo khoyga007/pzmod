@@ -641,6 +641,8 @@ h1, h2, h3 {
 @keyframes toast-in { from { transform: translateY(6px); opacity: 0; } }
 .log__line { color: var(--color-muted); overflow-wrap: anywhere; }
 .log__line--bad { color: var(--color-danger); }
+/* Cảnh báo (~): việc vẫn chạy tiếp, nên sáng hơn dòng thường nhưng không đỏ. */
+.log__line--warn { color: var(--color-ink); }
 .log__close { position: absolute; inset-block-start: var(--space-2xs); inset-inline-end: var(--space-2xs); }
 
 @media (max-width: 60rem) {
@@ -863,7 +865,10 @@ function ensureLogBox() {
 }
 
 function logLineHTML(l) {
-  return `<div class="log__line${/^\s*(!|ERROR)/.test(l) ? " log__line--bad" : ""}">${esc(l)}</div>`;
+  // "!" = hỏng thật, "~" = cảnh báo nhưng việc vẫn chạy tiếp.
+  const mark = /^\s*(!|ERROR)/.test(l) ? " log__line--bad"
+             : /^\s*~/.test(l) ? " log__line--warn" : "";
+  return `<div class="log__line${mark}">${esc(l)}</div>`;
 }
 
 function showLog(res) {

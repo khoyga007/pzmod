@@ -607,7 +607,7 @@ def with_deps(ids, depth=4):
             try:
                 dependencies = requires(wid)
             except Blocked as error:
-                print("  ! %s: không dò được mod bắt buộc (%s)" % (wid, error))
+                print("  ~ %s: chưa kiểm được mod bắt buộc (%s) - vẫn cài tiếp" % (wid, error))
         for dependency in dependencies:
             walk(dependency, left - 1)
         order.append(wid)
