@@ -2,14 +2,15 @@
 // All routes used by ui.html are native here; pzmod.py remains the CLI twin.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -224,6 +225,67 @@ fn collection_children(id: &str) -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
 
+static FOREGROUND_FETCHING: AtomicUsize = AtomicUsize::new(0);
+
+struct ForegroundGuard;
+impl ForegroundGuard {
+    fn new() -> Self {
+        FOREGROUND_FETCHING.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for ForegroundGuard {
+    fn drop(&mut self) {
+        FOREGROUND_FETCHING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn rate_limit_gap(is_foreground: bool) {
+    loop {
+        if !is_foreground && FOREGROUND_FETCHING.load(Ordering::SeqCst) > 0 {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        let wait = {
+            static LAST_HIT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+            let mut last = LAST_HIT.get_or_init(|| Mutex::new(None)).lock().unwrap();
+            if let Some(t) = *last {
+                if let Some(w) = BROWSE_GAP.checked_sub(t.elapsed()) {
+                    Some(w)
+                } else {
+                    *last = Some(Instant::now());
+                    None
+                }
+            } else {
+                *last = Some(Instant::now());
+                None
+            }
+        };
+        match wait {
+            Some(w) => {
+                if !is_foreground {
+                    let start = Instant::now();
+                    while start.elapsed() < w {
+                        if FOREGROUND_FETCHING.load(Ordering::SeqCst) > 0 {
+                            break;
+                        }
+                        thread::sleep(
+                            Duration::from_millis(50).min(w.saturating_sub(start.elapsed())),
+                        );
+                    }
+                } else {
+                    thread::sleep(w);
+                }
+            }
+            None => break,
+        }
+    }
+}
+
+fn is_valid_workshop_html(html: &str) -> bool {
+    html.contains("filedetails/?id=") && !html.to_lowercase().contains("too many requests")
+}
+
 fn cache_path(url: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
@@ -246,7 +308,7 @@ fn cached(url: &str, ttl: Option<Duration>) -> Option<String> {
         }
     }
     let html = fs::read_to_string(path).ok()?;
-    html.contains("filedetails/?id=").then_some(html)
+    is_valid_workshop_html(&html).then_some(html)
 }
 
 fn write_cache(url: &str, html: &str) -> Result<(), Blocked> {
@@ -269,25 +331,8 @@ fn community_error(error: ureq::Error) -> String {
     }
 }
 
-fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
-    if let Some(html) = cached(url, Some(ttl)) {
-        return Ok(html);
-    }
-
-    static LAST_HIT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    let mut last_hit = LAST_HIT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|_| Blocked("Khoá nhịp workshop bị lỗi".into()))?;
-    if let Some(html) = cached(url, Some(ttl)) {
-        return Ok(html);
-    }
-    if let Some(last) = *last_hit {
-        if let Some(wait) = BROWSE_GAP.checked_sub(last.elapsed()) {
-            thread::sleep(wait);
-        }
-    }
-    *last_hit = Some(Instant::now());
+fn fetch_page(url: &str, is_foreground: bool) -> Result<String, Blocked> {
+    rate_limit_gap(is_foreground);
 
     let fetched = http_agent()
         .get(url)
@@ -303,7 +348,7 @@ fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
         .and_then(|html| {
             if html.to_lowercase().contains("too many requests") {
                 Err(RATE_LIMITED.into())
-            } else if !html.contains("filedetails/?id=") {
+            } else if !is_valid_workshop_html(&html) {
                 Err("Steam không trả trang workshop hợp lệ".into())
             } else {
                 Ok(html)
@@ -317,6 +362,47 @@ fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
         }
         Err(why) => cached(url, None).ok_or(Blocked(why)),
     }
+}
+
+static REVALIDATING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn spawn_revalidate(url: String) {
+    let revalidating = REVALIDATING.get_or_init(|| Mutex::new(HashSet::new()));
+    {
+        let mut set = revalidating.lock().unwrap();
+        if set.contains(&url) {
+            return;
+        }
+        set.insert(url.clone());
+    }
+    thread::spawn(move || {
+        let _ = fetch_page(&url, false);
+        if let Some(set_lock) = REVALIDATING.get() {
+            if let Ok(mut set) = set_lock.lock() {
+                set.remove(&url);
+            }
+        }
+    });
+}
+
+fn cached_listing(url: &str) -> Result<String, Blocked> {
+    if let Some(html) = cached(url, Some(BROWSE_TTL)) {
+        return Ok(html);
+    }
+    if let Some(html) = cached(url, None) {
+        spawn_revalidate(url.to_string());
+        return Ok(html);
+    }
+    let _guard = ForegroundGuard::new();
+    fetch_page(url, true)
+}
+
+fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
+    if let Some(html) = cached(url, Some(ttl)) {
+        return Ok(html);
+    }
+    let _guard = ForegroundGuard::new();
+    fetch_page(url, true)
 }
 
 fn ids_after(html: &str, marker: &str) -> Vec<String> {
@@ -361,6 +447,58 @@ fn required_ids(id: &str) -> Result<Vec<String>, Blocked> {
         .filter(|dependency| dependency != id)
         .take(20)
         .collect())
+}
+
+fn required_ids_background(id: &str) -> Result<Vec<String>, Blocked> {
+    let url = format!("{ITEM_URL}{id}");
+    if cached(&url, Some(REQUIRES_TTL)).is_none() {
+        fetch_page(&url, false)?;
+    }
+    required_ids(id)
+}
+
+static PREFETCH_STATE: OnceLock<(Mutex<VecDeque<String>>, Condvar)> = OnceLock::new();
+static PREFETCH_WORKER_INIT: OnceLock<()> = OnceLock::new();
+
+fn queue_prefetch(ids: Vec<String>) {
+    let pair = PREFETCH_STATE.get_or_init(|| (Mutex::new(VecDeque::new()), Condvar::new()));
+    {
+        let mut queue = pair.0.lock().unwrap();
+        for id in ids {
+            let id = id.trim();
+            if !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_digit())
+                && !queue.contains(&id.to_string())
+            {
+                queue.push_back(id.to_string());
+            }
+        }
+    }
+    pair.1.notify_one();
+
+    PREFETCH_WORKER_INIT.get_or_init(|| {
+        thread::spawn(|| {
+            let pair = PREFETCH_STATE.get_or_init(|| (Mutex::new(VecDeque::new()), Condvar::new()));
+            loop {
+                let id = {
+                    let mut queue = pair.0.lock().unwrap();
+                    while queue.is_empty() {
+                        queue = pair.1.wait(queue).unwrap();
+                    }
+                    queue.pop_front()
+                };
+                if let Some(id) = id {
+                    let _ = required_ids_background(&id);
+                }
+            }
+        });
+    });
+}
+
+#[tauri::command]
+fn prefetch(ids: Vec<String>) -> Result<Value, String> {
+    queue_prefetch(ids);
+    Ok(json!({ "ok": true }))
 }
 
 fn maybe_id(value: &str) -> Option<String> {
@@ -904,7 +1042,7 @@ fn browse(
                 .iter()
                 .map(|tag| ("requiredtags[]".into(), tag.clone())),
         );
-        let html = cached_page(&(BROWSE_URL.to_string() + &form_body(&fields)), BROWSE_TTL)
+        let html = cached_listing(&(BROWSE_URL.to_string() + &form_body(&fields)))
             .map_err(|error| error.to_string())?;
         extract_listing_ids(&html)
     };
@@ -1168,7 +1306,7 @@ fn state_internal(game: &Path, user: &Path) -> Result<State, String> {
         bisect_ready: true,
         ported: vec![
             "state", "enable", "disable", "browse", "detail", "bisect", "install", "remove",
-            "update",
+            "update", "prefetch",
         ],
     })
 }
@@ -2041,7 +2179,7 @@ fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value, Strin
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            state, enable, disable, browse, detail, bisect, install, remove, update
+            state, enable, disable, browse, detail, bisect, install, remove, update, prefetch
         ])
         .run(tauri::generate_context!())
         .expect("pzmod: tauri failed to start");
@@ -2423,5 +2561,48 @@ mod tests {
 
         fs::remove_file(&state_file).ok();
         fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn cached_listing_serves_fresh_and_stale_and_rejects_block_page() {
+        let user = test_root("cache-test");
+        let prev_user = std::env::var_os("PZ_USER");
+        std::env::set_var("PZ_USER", &user);
+
+        let url = "https://example.invalid/listing_test";
+        let cpath = cache_path(url);
+        fs::create_dir_all(cpath.parent().unwrap()).unwrap();
+
+        // 1. Fresh valid listing
+        let good_html = "sharedfiles/filedetails/?id=111 sharedfiles/filedetails/?id=222";
+        fs::write(&cpath, good_html).unwrap();
+        assert_eq!(cached(url, Some(BROWSE_TTL)).as_deref(), Some(good_html));
+        assert_eq!(cached_listing(url).unwrap(), good_html);
+
+        // 2. Block page in cache -> must NOT be served
+        fs::write(&cpath, "You've made too many requests recently").unwrap();
+        assert!(cached(url, None).is_none());
+
+        // 3. Page without required marker -> must NOT be served
+        fs::write(&cpath, "<html>random text</html>").unwrap();
+        assert!(cached(url, None).is_none());
+
+        // 4. Valid listing in stale cache -> cached_listing serves it (SWR)
+        fs::write(&cpath, good_html).unwrap();
+        assert_eq!(cached(url, None).as_deref(), Some(good_html));
+
+        if let Some(prev) = prev_user {
+            std::env::set_var("PZ_USER", prev);
+        } else {
+            std::env::remove_var("PZ_USER");
+        }
+        fs::remove_dir_all(&user).ok();
+    }
+
+    #[test]
+    fn prefetch_command_accepts_ids() {
+        let res = prefetch(vec!["123".into(), "456".into(), "invalid".into()]);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap()["ok"], true);
     }
 }

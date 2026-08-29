@@ -301,6 +301,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(capture(pzmod.cmd_remove, [wid]))
                 if url.path == "/api/update":
                     return self.send(capture(pzmod.cmd_update, []))
+                if url.path == "/api/prefetch":
+                    ids = body.get("ids") or []
+                    if isinstance(ids, list):
+                        pzmod.prefetch(ids)
+                    return self.send({"ok": True})
                 if url.path in ("/api/enable", "/api/disable"):
                     if not isinstance(folder, str) or not folder:
                         return self.send({"error": "bad folder"}, code=400)

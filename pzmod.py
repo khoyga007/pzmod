@@ -520,27 +520,52 @@ def cmd_install(args, force=False, deps=True):
         print("  ! thiếu mod bắt buộc: %s" % ", ".join(missing))
 
 
-def cached_page(url, ttl=BROWSE_TTL):
-    """Return cached listing HTML, serving stale data when Steam blocks a refresh."""
+_foreground_active = [0]
+_foreground_lock = threading.Lock()
+_revalidating = set()
+_revalidating_lock = threading.Lock()
+
+
+def _revalidate_bg(url):
+    with _revalidating_lock:
+        if url in _revalidating:
+            return
+        _revalidating.add(url)
+    try:
+        _fetch_and_cache(url, is_foreground=False)
+    except Exception:
+        pass
+    finally:
+        with _revalidating_lock:
+            _revalidating.discard(url)
+
+
+def _fetch_and_cache(url, is_foreground=True):
     path = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".html")
+    if is_foreground:
+        with _foreground_lock:
+            _foreground_active[0] += 1
+    try:
+        while True:
+            if not is_foreground and _foreground_active[0] > 0:
+                time.sleep(0.1)
+                continue
+            with _hit_lock:
+                gap = BROWSE_GAP - (time.time() - _last_hit[0])
+                if gap > 0:
+                    if not is_foreground:
+                        start = time.time()
+                        while time.time() - start < gap:
+                            if _foreground_active[0] > 0:
+                                break
+                            time.sleep(min(0.05, gap - (time.time() - start)))
+                        if _foreground_active[0] > 0:
+                            continue
+                    else:
+                        time.sleep(gap)
+                _last_hit[0] = time.time()
+                break
 
-    def cached(require_fresh):
-        if not os.path.exists(path):
-            return None
-        if require_fresh and time.time() - os.path.getmtime(path) >= ttl:
-            return None
-        with open(path, encoding="utf-8") as cache_file:
-            html = cache_file.read()
-        return html if "filedetails/?id=" in html else None
-
-    fresh = cached(True)
-    if fresh:
-        return fresh
-    with _hit_lock:
-        gap = BROWSE_GAP - (time.time() - _last_hit[0])
-        if gap > 0:
-            time.sleep(gap)
-        _last_hit[0] = time.time()
         try:
             request = urllib.request.Request(url, headers=UA)
             with urllib.request.urlopen(request, timeout=60) as response:
@@ -555,15 +580,96 @@ def cached_page(url, ttl=BROWSE_TTL):
             why = None
             if "too many requests" in html.lower():
                 html, why = None, RATE_LIMITED
-    if html is None:
-        stale = cached(False)
+            elif "filedetails/?id=" not in html:
+                html, why = None, "Steam không trả trang workshop hợp lệ"
+
+        if html is None:
+            raise Blocked(why)
+
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as cache_file:
+            cache_file.write(html)
+        return html
+    finally:
+        if is_foreground:
+            with _foreground_lock:
+                _foreground_active[0] -= 1
+
+
+def cached_page(url, ttl=BROWSE_TTL):
+    """Return cached listing HTML, serving stale data when Steam blocks a refresh."""
+    path = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".html")
+
+    def cached(require_fresh):
+        if not os.path.exists(path):
+            return None
+        if require_fresh and time.time() - os.path.getmtime(path) >= ttl:
+            return None
+        try:
+            with open(path, encoding="utf-8") as cache_file:
+                html = cache_file.read()
+        except OSError:
+            return None
+        if "filedetails/?id=" not in html or "too many requests" in html.lower():
+            return None
+        return html
+
+    fresh = cached(True)
+    if fresh:
+        return fresh
+
+    stale = cached(False)
+    if stale and ttl <= BROWSE_TTL:
+        threading.Thread(target=_revalidate_bg, args=(url,), daemon=True).start()
+        return stale
+
+    try:
+        return _fetch_and_cache(url, is_foreground=True)
+    except Blocked as error:
         if stale:
             return stale
-        raise Blocked(why)
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as cache_file:
-        cache_file.write(html)
-    return html
+        raise
+
+
+_prefetch_queue = []
+_prefetch_lock = threading.Lock()
+_prefetch_event = threading.Event()
+_prefetch_worker_started = False
+
+
+def _prefetch_worker():
+    while True:
+        _prefetch_event.wait()
+        while True:
+            with _prefetch_lock:
+                if not _prefetch_queue:
+                    _prefetch_event.clear()
+                    break
+                wid = _prefetch_queue.pop(0)
+            url = ITEM_URL % wid
+            path = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".html")
+            is_fresh = os.path.exists(path) and (time.time() - os.path.getmtime(path) < REQUIRES_TTL)
+            if not is_fresh:
+                try:
+                    requires(wid)
+                except Exception:
+                    pass
+
+
+def prefetch(ids):
+    """Background worker to warm dependency item pages into the cache."""
+    global _prefetch_worker_started
+    if not isinstance(ids, (list, tuple)):
+        return
+    with _prefetch_lock:
+        for wid in ids:
+            wid = str(wid).strip()
+            if wid.isdigit() and wid not in _prefetch_queue:
+                _prefetch_queue.append(wid)
+        if not _prefetch_worker_started:
+            _prefetch_worker_started = True
+            threading.Thread(target=_prefetch_worker, daemon=True).start()
+        _prefetch_event.set()
 
 
 ITEM_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id=%s"

@@ -19,6 +19,7 @@ Do not run `build.bat` / release builds unless Yang explicitly asks.
 | `POST /api/install` | steamcmd + `with_deps` | `install` | done |
 | `POST /api/update` / `/api/remove` | state-file lane | `update` / `remove` | done |
 | `POST /api/bisect` | `pzbisect.bisect_*` | `bisect` | done |
+| `POST /api/prefetch` | `pzmod.prefetch()` background warm | `prefetch` | done |
 | `GET /img?u=` | CDN proxy + allowlist | none needed | webview loads Steam CDN direct (`csp: null`) |
 | `GET /tokens.css` | file serve | none needed | shipped inside `ui/` |
 
