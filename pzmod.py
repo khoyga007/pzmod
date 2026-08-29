@@ -43,8 +43,13 @@ BROWSE = "https://steamcommunity.com/workshop/browse/?"
 UA = {"User-Agent": "Mozilla/5.0 (pzmod)"}
 
 SORTS = {"trend": "Thịnh hành tuần", "totaluniquesubscriptions": "Nhiều sub nhất",
-         "toprated": "Đánh giá cao nhất", "mostrecent": "Mới nhất",
-         "textsearch": "Khớp từ khoá"}
+         "toprated": "Đánh giá cao nhất", "num_parent_items": "Được cần nhiều nhất",
+         "mostrecent": "Mới nhất", "textsearch": "Khớp từ khoá"}
+
+# "Most Required by Other Items" của Workshop không phải chỉ đổi browsesort: nó
+# còn cần special_filter=6, thiếu là Steam lặng lẽ trả về danh sách mặc định.
+# Số 6 lấy từ hàm onViewAll trong bundle JS của trang chủ workshop.
+SPECIAL_FILTER = {"num_parent_items": "6"}
 
 # Steam bỏ qua browsesort nếu thiếu days: hỏi "nhiều sub nhất" mà không kèm cửa
 # sổ thời gian thì nó trả về đúng danh sách trending, nên bộ lọc trông như chết.
@@ -588,6 +593,8 @@ def browse(query="", sort="trend", page=1, tags=(), days=None):
     if browse_sort in SORT_DAYS:
         window = days if days in dict(PERIODS) else SORT_DAYS[browse_sort]
         fields.append(("days", window))
+    if browse_sort in SPECIAL_FILTER:
+        fields.append(("special_filter", SPECIAL_FILTER[browse_sort]))
     fields.extend(("requiredtags[]", tag) for tag in tags)
     html = cached_page(BROWSE + urllib.parse.urlencode(fields))
     ids, seen = [], set()

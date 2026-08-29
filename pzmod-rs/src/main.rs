@@ -34,6 +34,7 @@ const SORTS: &[&str] = &[
     "trend",
     "totaluniquesubscriptions",
     "toprated",
+    "num_parent_items",
     "mostrecent",
     "textsearch",
 ];
@@ -41,6 +42,7 @@ const SORT_LABELS: &[(&str, &str)] = &[
     ("trend", "Thịnh hành tuần"),
     ("totaluniquesubscriptions", "Nhiều sub nhất"),
     ("toprated", "Đánh giá cao nhất"),
+    ("num_parent_items", "Được cần nhiều nhất"),
     ("mostrecent", "Mới nhất"),
     ("textsearch", "Khớp từ khoá"),
 ];
@@ -876,6 +878,12 @@ fn browse(
         if !q.is_empty() {
             fields.push(("searchtext".into(), q));
         }
+        // "Được cần nhiều nhất" is not just another browsesort: without
+        // special_filter=6 Steam quietly answers with the default listing. The
+        // 6 comes from the onViewAll handler in the workshop home JS bundle.
+        if browse_sort == "num_parent_items" {
+            fields.push(("special_filter".into(), "6".into()));
+        }
         if let Some(fallback) = sort_days(browse_sort) {
             let window = days
                 .as_deref()
@@ -1039,6 +1047,7 @@ struct SortLabels {
     trend: &'static str,
     totaluniquesubscriptions: &'static str,
     toprated: &'static str,
+    num_parent_items: &'static str,
     mostrecent: &'static str,
     textsearch: &'static str,
 }
@@ -1142,8 +1151,9 @@ fn state_internal(game: &Path, user: &Path) -> Result<State, String> {
             trend: SORT_LABELS[0].1,
             totaluniquesubscriptions: SORT_LABELS[1].1,
             toprated: SORT_LABELS[2].1,
-            mostrecent: SORT_LABELS[3].1,
-            textsearch: SORT_LABELS[4].1,
+            num_parent_items: SORT_LABELS[3].1,
+            mostrecent: SORT_LABELS[4].1,
+            textsearch: SORT_LABELS[5].1,
         },
         periods: PERIODS.iter().map(|(v, label)| [*v, *label]).collect(),
         tags: TAGS.iter().map(|tag| (*tag).to_string()).collect(),
