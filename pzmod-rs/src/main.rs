@@ -29,6 +29,14 @@ const UA: &str = "Mozilla/5.0 (pzmod)";
 const BROWSE_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUIRES_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const BROWSE_GAP: Duration = Duration::from_secs(2);
+/// Item pages are ~130 KB against ~680 KB for a listing page, so Steam tolerates a
+/// tighter cadence for them. Measured 30/08/2026: the fetch itself is 0.7 s, so
+/// 2 s was pure waiting. 0.35 s x 4 workers did run 4.5x faster but tripped
+/// Steam's limiter after ~22 pages, so the shipped numbers stay well under that.
+const ITEM_GAP: Duration = Duration::from_millis(800);
+const ITEM_WORKERS: usize = 3;
+/// A 429 anywhere drops every page back to the listing cadence for this long.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(20 * 60);
 const RATE_LIMITED: &str =
     "Steam chặn vì hỏi quá nhiều - chờ 10-30 phút. IP Warp là IP dùng chung nên dễ dính hơn IP nhà";
 
@@ -406,7 +414,29 @@ impl Drop for ForegroundGuard {
     }
 }
 
-fn rate_limit_gap(is_foreground: bool) {
+static GAP_FLOOR_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+fn note_rate_limit() {
+    let cell = GAP_FLOOR_UNTIL.get_or_init(|| Mutex::new(None));
+    *cell.lock().unwrap() = Some(Instant::now() + RATE_LIMIT_COOLDOWN);
+}
+
+/// Gap to honour right now, letting a rate-limit penalty expire on its own.
+fn effective_gap(gap: Duration) -> Duration {
+    let cell = GAP_FLOOR_UNTIL.get_or_init(|| Mutex::new(None));
+    let mut until = cell.lock().unwrap();
+    match *until {
+        Some(deadline) if Instant::now() < deadline => gap.max(BROWSE_GAP),
+        Some(_) => {
+            *until = None;
+            gap
+        }
+        None => gap,
+    }
+}
+
+fn rate_limit_gap(is_foreground: bool, gap: Duration) {
+    let gap = effective_gap(gap);
     loop {
         if !is_foreground && FOREGROUND_FETCHING.load(Ordering::SeqCst) > 0 {
             thread::sleep(Duration::from_millis(100));
@@ -416,7 +446,7 @@ fn rate_limit_gap(is_foreground: bool) {
             static LAST_HIT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
             let mut last = LAST_HIT.get_or_init(|| Mutex::new(None)).lock().unwrap();
             if let Some(t) = *last {
-                if let Some(w) = BROWSE_GAP.checked_sub(t.elapsed()) {
+                if let Some(w) = gap.checked_sub(t.elapsed()) {
                     Some(w)
                 } else {
                     *last = Some(Instant::now());
@@ -497,8 +527,8 @@ fn community_error(error: ureq::Error) -> String {
     }
 }
 
-fn fetch_page(url: &str, is_foreground: bool) -> Result<String, Blocked> {
-    rate_limit_gap(is_foreground);
+fn fetch_page(url: &str, is_foreground: bool, gap: Duration) -> Result<String, Blocked> {
+    rate_limit_gap(is_foreground, gap);
 
     let fetched = http_agent()
         .get(url)
@@ -526,7 +556,12 @@ fn fetch_page(url: &str, is_foreground: bool) -> Result<String, Blocked> {
             write_cache(url, &html)?;
             Ok(html)
         }
-        Err(why) => cached(url, None).ok_or(Blocked(why)),
+        Err(why) => {
+            if why == RATE_LIMITED {
+                note_rate_limit();
+            }
+            cached(url, None).ok_or(Blocked(why))
+        }
     }
 }
 
@@ -542,7 +577,7 @@ fn spawn_revalidate(url: String) {
         set.insert(url.clone());
     }
     thread::spawn(move || {
-        let _ = fetch_page(&url, false);
+        let _ = fetch_page(&url, false, BROWSE_GAP);
         if let Some(set_lock) = REVALIDATING.get() {
             if let Ok(mut set) = set_lock.lock() {
                 set.remove(&url);
@@ -560,10 +595,10 @@ fn cached_listing(url: &str) -> Result<String, Blocked> {
         return Ok(html);
     }
     let _guard = ForegroundGuard::new();
-    fetch_page(url, true)
+    fetch_page(url, true, BROWSE_GAP)
 }
 
-fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
+fn cached_page(url: &str, ttl: Duration, gap: Duration) -> Result<String, Blocked> {
     if let Some(html) = cached(url, Some(ttl)) {
         return Ok(html);
     }
@@ -571,7 +606,7 @@ fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
     // Steam chặn -> dùng lại bản cache cũ thay vì bó tay, y như lane Python
     // (pzmod.py cached_page). Mục "Required Items" của một mod gần như không đổi,
     // bản cũ vẫn dò được phụ thuộc; hết cách mới trả lỗi.
-    fetch_page(url, true).or_else(|blocked| cached(url, None).ok_or(blocked))
+    fetch_page(url, true, gap).or_else(|blocked| cached(url, None).ok_or(blocked))
 }
 
 fn ids_after(html: &str, marker: &str) -> Vec<String> {
@@ -601,7 +636,7 @@ fn extract_listing_ids(html: &str) -> Vec<String> {
 }
 
 fn required_ids(id: &str) -> Result<Vec<String>, Blocked> {
-    let html = cached_page(&format!("{ITEM_URL}{id}"), REQUIRES_TTL)?;
+    let html = cached_page(&format!("{ITEM_URL}{id}"), REQUIRES_TTL, ITEM_GAP)?;
     let Some(start) = html.find("id=\"RequiredItems\"") else {
         return Ok(Vec::new());
     };
@@ -621,7 +656,7 @@ fn required_ids(id: &str) -> Result<Vec<String>, Blocked> {
 fn required_ids_background(id: &str) -> Result<Vec<String>, Blocked> {
     let url = format!("{ITEM_URL}{id}");
     if cached(&url, Some(REQUIRES_TTL)).is_none() {
-        fetch_page(&url, false)?;
+        fetch_page(&url, false, ITEM_GAP)?;
     }
     required_ids(id)
 }
@@ -1919,29 +1954,98 @@ fn install_one_with_source(
     install_from_source(id, detail, source, user)
 }
 
-fn walk_dependencies(
+fn dedup_ids(ids: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    ids.iter()
+        .filter(|id| seen.insert((*id).clone()))
+        .cloned()
+        .collect()
+}
+
+/// Scrape one whole level of Required Items at once. A blocked id drops out of
+/// the map instead of sinking the batch, same as the single-page path.
+fn required_ids_many(ids: &[String], log: &mut Vec<String>) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for chunk in ids.chunks(ITEM_WORKERS) {
+        let handles: Vec<_> = chunk
+            .iter()
+            .map(|id| {
+                let id = id.clone();
+                thread::spawn(move || {
+                    let found = required_ids(&id);
+                    (id, found)
+                })
+            })
+            .collect();
+        for handle in handles {
+            let Ok((id, found)) = handle.join() else {
+                continue;
+            };
+            match found {
+                Ok(required) => {
+                    out.insert(id, required);
+                }
+                Err(error) => log.push(format!(
+                    "~ {id}: chưa kiểm được mod bắt buộc ({error}) - vẫn cài tiếp"
+                )),
+            }
+        }
+    }
+    out
+}
+
+fn post_order(
     id: &str,
-    depth: usize,
+    graph: &HashMap<String, Vec<String>>,
     seen: &mut HashSet<String>,
     order: &mut Vec<String>,
-    log: &mut Vec<String>,
 ) {
     if !seen.insert(id.to_string()) {
         return;
     }
-    if depth > 0 {
-        match required_ids(id) {
-            Ok(required) => {
-                for dependency in required {
-                    walk_dependencies(&dependency, depth - 1, seen, order, log);
-                }
-            }
-            Err(error) => log.push(format!(
-                "~ {id}: chưa kiểm được mod bắt buộc ({error}) - vẫn cài tiếp"
-            )),
-        }
+    for dependency in graph.get(id).map(Vec::as_slice).unwrap_or(&[]) {
+        post_order(dependency, graph, seen, order);
     }
     order.push(id.to_string());
+}
+
+/// Workshop ids in dependency-first post-order, scraped level by level rather
+/// than depth-first so each level goes out in parallel.
+fn dependency_order(ids: &[String], depth: usize, log: &mut Vec<String>) -> Vec<String> {
+    let ids = dedup_ids(ids);
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    let mut level = ids.clone();
+    let mut left = depth;
+    while !level.is_empty() && left > 0 {
+        let batch: Vec<String> = level
+            .iter()
+            .filter(|id| !graph.contains_key(*id))
+            .cloned()
+            .collect();
+        if batch.is_empty() {
+            break;
+        }
+        let found = required_ids_many(&batch, log);
+        let mut next = Vec::new();
+        for id in &batch {
+            let required = found.get(id).cloned().unwrap_or_default();
+            next.extend(
+                required
+                    .iter()
+                    .filter(|dependency| !graph.contains_key(*dependency))
+                    .cloned(),
+            );
+            graph.insert(id.clone(), required);
+        }
+        level = dedup_ids(&next);
+        left -= 1;
+    }
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    for id in &ids {
+        post_order(id, &graph, &mut seen, &mut order);
+    }
+    order
 }
 
 fn search_ids(query: &str) -> Result<Vec<String>, String> {
@@ -1967,43 +2071,130 @@ fn search_modid_candidates(modid: &str) -> Result<Vec<String>, String> {
     }
 }
 
-fn resolve_modid(
-    modid: &str,
-    cache: &mut ResolutionCache,
-) -> Result<Option<(String, PathBuf)>, String> {
-    progress_push(format!("đang dò mod bắt buộc: {modid}"));
-    let key = normalize_required(modid).to_lowercase();
-    if let Some(cached) = cache.get(&key).cloned() {
-        let Some(id) = cached else {
-            progress_push(format!("không tìm thấy workshop id cho {modid}"));
-            return Ok(None);
-        };
-        let mut sources = download_items(std::slice::from_ref(&id), false)?;
-        if sources
-            .get(&id)
-            .is_some_and(|source| source_provides_modid(source, modid).unwrap_or(false))
-        {
-            progress_push(format!("đã tìm thấy {modid} ({id})"));
-            return Ok(sources.remove(&id).map(|source| (id, source)));
+/// Serve items already sitting in the steamcmd content folder without starting
+/// steamcmd at all - a session costs ~5 s before it downloads a single byte.
+/// Only for callers that just read mod.info; the copy an install lands comes
+/// from a normal download.
+fn download_items_reuse(ids: &[String]) -> Result<HashMap<String, PathBuf>, String> {
+    let executable = steamcmd_exe()?;
+    let content = executable
+        .parent()
+        .ok_or("steamcmd.exe không có thư mục cha")?
+        .join("steamapps")
+        .join("workshop")
+        .join("content")
+        .join(APPID);
+    let mut have = HashMap::new();
+    let mut missing = Vec::new();
+    for id in dedup_ids(ids) {
+        let destination = content.join(&id);
+        if destination.is_dir() {
+            have.insert(id, destination);
+        } else {
+            missing.push(id);
         }
-        cache.remove(&key);
+    }
+    if !missing.is_empty() {
+        have.extend(download_items(&missing, false)?);
+    }
+    Ok(have)
+}
+
+/// Resolve several mod ids at once, sharing steamcmd sessions: two for the whole
+/// batch instead of two per mod id. Returned in input order.
+fn resolve_modids(
+    modids: &[String],
+    cache: &mut ResolutionCache,
+) -> Result<Vec<(String, String, PathBuf)>, String> {
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for modid in modids {
+        let key = normalize_required(modid).to_lowercase();
+        if !key.is_empty() && !wanted.iter().any(|(seen, _)| seen == &key) {
+            wanted.push((key, modid.clone()));
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    progress_push(format!(
+        "đang dò mod bắt buộc: {}",
+        wanted
+            .iter()
+            .map(|(_, modid)| modid.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
+    let remembered: Vec<String> = wanted
+        .iter()
+        .filter_map(|(key, _)| cache.get(key).cloned().flatten())
+        .collect();
+    let verified = if remembered.is_empty() {
+        HashMap::new()
+    } else {
+        download_items_reuse(&remembered)?
+    };
+
+    let mut found: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut unresolved: Vec<(String, String)> = Vec::new();
+    for (key, modid) in &wanted {
+        match cache.get(key) {
+            Some(None) => {
+                progress_push(format!("không tìm thấy workshop id cho {modid}"));
+                continue;
+            }
+            Some(Some(id)) => {
+                let id = id.clone();
+                if verified
+                    .get(&id)
+                    .is_some_and(|source| source_provides_modid(source, modid).unwrap_or(false))
+                {
+                    progress_push(format!("đã tìm thấy {modid} ({id})"));
+                    found.push((modid.clone(), id.clone(), verified[&id].clone()));
+                    continue;
+                }
+            }
+            None => {}
+        }
+        cache.remove(key);
+        unresolved.push((key.clone(), modid.clone()));
     }
 
-    let candidates = search_modid_candidates(modid)?;
-    if candidates.is_empty() {
-        cache.insert(key, None);
-        progress_push(format!("không tìm thấy workshop id cho {modid}"));
-        return Ok(None);
+    if !unresolved.is_empty() {
+        let mut searched = Vec::new();
+        for (key, modid) in unresolved {
+            let candidates = search_modid_candidates(&modid)?;
+            searched.push((key, modid, candidates));
+        }
+        let pool: Vec<String> = searched
+            .iter()
+            .flat_map(|(_, _, candidates)| candidates.iter().cloned())
+            .collect();
+        let sources = if pool.is_empty() {
+            HashMap::new()
+        } else {
+            download_items_reuse(&pool)?
+        };
+        for (key, modid, candidates) in searched {
+            let matched = matching_candidate(&modid, &candidates, &sources)?;
+            cache.insert(key, matched.clone());
+            match matched.and_then(|id| sources.get(&id).map(|source| (id, source.clone()))) {
+                Some((id, source)) => {
+                    progress_push(format!("đã tìm thấy {modid} ({id})"));
+                    found.push((modid, id, source));
+                }
+                None => progress_push(format!("không tìm thấy workshop id cho {modid}")),
+            }
+        }
     }
-    let mut sources = download_items(&candidates, false)?;
-    let matched = matching_candidate(modid, &candidates, &sources)?;
-    cache.insert(key, matched.clone());
-    if let Some(id) = &matched {
-        progress_push(format!("đã tìm thấy {modid} ({id})"));
-    } else {
-        progress_push(format!("không tìm thấy workshop id cho {modid}"));
+
+    let mut ordered = Vec::new();
+    for (_, modid) in &wanted {
+        if let Some(index) = found.iter().position(|(name, _, _)| name == modid) {
+            ordered.push(found.remove(index));
+        }
     }
-    Ok(matched.and_then(|id| sources.remove(&id).map(|source| (id, source))))
+    Ok(ordered)
 }
 
 fn index_sources(sources: &HashMap<String, PathBuf>, providers: &mut HashMap<String, String>) {
@@ -2059,6 +2250,7 @@ fn walk_mod_dependencies(
         }
         None => Vec::new(),
     };
+    let mut pending = Vec::new();
     for modid in required {
         let key = modid.to_lowercase();
         if let Some(provider) = providers.get(&key).cloned() {
@@ -2077,61 +2269,59 @@ fn walk_mod_dependencies(
             }
             continue;
         }
-        if depth == 0 {
-            continue;
+        if depth > 0 {
+            pending.push(modid);
         }
-        let (provider, source) = match resolve_modid(&modid, cache) {
-            Ok(Some(resolved)) => resolved,
-            Ok(None) => continue,
+    }
+    // every unknown mod id of this node resolves in one pass, so the whole node
+    // costs two steamcmd sessions instead of two per mod id
+    if !pending.is_empty() {
+        let resolved = match resolve_modids(&pending, cache) {
+            Ok(resolved) => resolved,
             Err(error) => {
-                log.push(format!("! {modid}: không dò được workshop id ({error})"));
-                continue;
+                log.push(format!(
+                    "! {}: không dò được workshop id ({error})",
+                    pending.join(", ")
+                ));
+                Vec::new()
             }
         };
-        sources.insert(provider.clone(), source);
-        index_sources(sources, providers);
-
-        let title = details(std::slice::from_ref(&provider))
-            .ok()
-            .and_then(|metadata| {
-                metadata
-                    .get(&provider)
+        if !resolved.is_empty() {
+            // the resolver may have read a stale copy off disk just to see which
+            // mod ids it provides; the install copy comes from the batched
+            // download below, never from that
+            let added: Vec<String> = resolved.into_iter().map(|(_, id, _)| id).collect();
+            let titles = details(&added).unwrap_or_default();
+            for provider in &added {
+                let title = titles
+                    .get(provider)
                     .map(|item| value_string(item, "title"))
-            })
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| provider.clone());
-        let line = format!("kèm mod bắt buộc: {title} ({provider})");
-        log.push(line);
-
-        let mut workshop_seen = HashSet::new();
-        let mut workshop_order = Vec::new();
-        walk_dependencies(
-            &provider,
-            depth - 1,
-            &mut workshop_seen,
-            &mut workshop_order,
-            log,
-        );
-        let needed: Vec<_> = workshop_order
-            .iter()
-            .filter(|item| !sources.contains_key(*item))
-            .cloned()
-            .collect();
-        if !needed.is_empty() {
-            sources.extend(download_items(&needed, false)?);
-            index_sources(sources, providers);
-        }
-        for item in workshop_order {
-            walk_mod_dependencies(
-                &item,
-                depth - 1,
-                sources,
-                providers,
-                cache,
-                seen,
-                order,
-                log,
-            )?;
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| provider.clone());
+                log.push(format!("kèm mod bắt buộc: {title} ({provider})"));
+            }
+            let workshop_order = dependency_order(&added, depth - 1, log);
+            let needed: Vec<_> = workshop_order
+                .iter()
+                .filter(|item| !sources.contains_key(*item))
+                .cloned()
+                .collect();
+            if !needed.is_empty() {
+                sources.extend(download_items(&needed, false)?);
+                index_sources(sources, providers);
+            }
+            for item in workshop_order {
+                walk_mod_dependencies(
+                    &item,
+                    depth - 1,
+                    sources,
+                    providers,
+                    cache,
+                    seen,
+                    order,
+                    log,
+                )?;
+            }
         }
     }
     order.push(id.to_string());
@@ -2187,11 +2377,7 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
         log.push(line);
     }
     let requested: HashSet<_> = todo.iter().cloned().collect();
-    let mut seen = HashSet::new();
-    let mut order = Vec::new();
-    for item in todo {
-        walk_dependencies(&item, 4, &mut seen, &mut order, &mut log);
-    }
+    let order = dependency_order(&todo, 4, &mut log);
     progress_lines(&log);
     let extra: Vec<_> = order
         .iter()
@@ -2965,6 +3151,44 @@ mod tests {
     }
 
     #[test]
+    fn dependencies_come_out_deepest_first_without_revisiting() {
+        let graph: HashMap<String, Vec<String>> = [
+            ("1", vec!["2", "3"]),
+            ("2", vec!["4"]),
+            ("3", vec!["4"]),
+            ("4", vec![]),
+        ]
+        .into_iter()
+        .map(|(id, deps)| {
+            (
+                id.to_string(),
+                deps.into_iter().map(str::to_string).collect(),
+            )
+        })
+        .collect();
+        let mut seen = HashSet::new();
+        let mut order = Vec::new();
+        post_order("1", &graph, &mut seen, &mut order);
+        assert_eq!(order, ["4", "2", "3", "1"]);
+        assert_eq!(
+            dedup_ids(&["1".into(), "2".into(), "1".into()]),
+            ["1", "2"]
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_slows_every_page_down_then_expires() {
+        let cell = GAP_FLOOR_UNTIL.get_or_init(|| Mutex::new(None));
+        let keep = *cell.lock().unwrap();
+        note_rate_limit();
+        assert_eq!(effective_gap(ITEM_GAP), BROWSE_GAP);
+        *cell.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(effective_gap(ITEM_GAP), ITEM_GAP);
+        assert!(cell.lock().unwrap().is_none(), "penalty must clear itself");
+        *cell.lock().unwrap() = keep;
+    }
+
+    #[test]
     fn modid_resolver_checks_only_three_exact_candidates() {
         let root = test_root("modid-resolver");
         let html = ["11", "22", "33", "44"]
@@ -3394,7 +3618,7 @@ mod tests {
 
         // 5. TTL expired + refresh impossible (nothing listening) ->
         //    cached_page still serves the stale copy instead of failing.
-        assert_eq!(cached_page(url, Duration::ZERO).unwrap(), good_html);
+        assert_eq!(cached_page(url, Duration::ZERO, ITEM_GAP).unwrap(), good_html);
 
         if let Some(prev) = prev_user {
             std::env::set_var("PZ_USER", prev);

@@ -128,6 +128,16 @@ TAGS = ["Build 40", "Build 41", "Build 42", "Animals", "Audio", "Balance",
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 BROWSE_TTL = 30 * 60
 BROWSE_GAP = 2.0
+# Item pages are ~130 KB against ~680 KB for a listing page, so Steam tolerates a
+# tighter cadence for them. Measured 30/08/2026: fetch itself is 0.7 s, so 2.0 s
+# was pure waiting. 0.35 s x 4 workers did run 4.5x faster but tripped Steam's
+# limiter after ~22 pages, so the shipped numbers stay well under that.
+ITEM_GAP = 0.8
+ITEM_WORKERS = 3
+# A 429 anywhere drops the whole process back to the listing cadence for a while.
+RATE_LIMIT_COOLDOWN = 20 * 60
+_gap_floor = [0.0]
+_gap_floor_until = [0.0]
 _last_hit = [0.0]
 _hit_lock = threading.Lock()
 
@@ -450,8 +460,13 @@ def _steamcmd_success_id(line):
     return line.split(marker, 1)[1].split(None, 1)[0]
 
 
-def download_many(wids, force=False, labels=None):
-    """Download workshop items through one SteamCMD process."""
+def download_many(wids, force=False, labels=None, reuse=False):
+    """Download workshop items through one SteamCMD process.
+
+    reuse=True serves items already sitting in the steamcmd content folder without
+    starting steamcmd at all - a session costs ~5 s before it downloads anything.
+    Only for callers that just need to read mod.info; installs must not set it.
+    """
     if any(not wid.isdigit() for wid in wids):
         die("Workshop id không hợp lệ")
     exe = steamcmd()
@@ -462,8 +477,14 @@ def download_many(wids, force=False, labels=None):
         manifest = os.path.join(root, "appworkshop_%s.acf" % APPID)
         if os.path.exists(manifest):
             os.remove(manifest)
+    pending = list(wids)
+    if reuse and not force:
+        pending = [wid for wid in wids
+                   if not os.path.isdir(os.path.join(root, "content", APPID, wid))]
+        if not pending:
+            return {wid: os.path.join(root, "content", APPID, wid) for wid in wids}
     command = [exe, "+login", "anonymous"]
-    for wid in wids:
+    for wid in pending:
         command.extend(["+workshop_download_item", APPID, wid])
     command.append("+quit")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -646,25 +667,36 @@ def install_one(wid, detail=None, force=False, source=None, downloaded=False):
 
 
 def with_deps(ids, depth=4):
-    """Return workshop ids in dependency-first post-order."""
+    """Return workshop ids in dependency-first post-order.
+
+    Scraped level by level rather than depth-first: one whole level goes out in
+    parallel, so N item pages cost about N*ITEM_GAP instead of N*BROWSE_GAP.
+    """
+    ids = [wid for wid in dict.fromkeys(ids)]
+    graph, level, left = {}, list(ids), depth
+    while level and left > 0:
+        batch = [wid for wid in level if wid not in graph]
+        if not batch:
+            break
+        found = requires_many(batch)
+        nxt = []
+        for wid in batch:
+            graph[wid] = found.get(wid, [])
+            nxt.extend(dep for dep in graph[wid] if dep not in graph)
+        level, left = list(dict.fromkeys(nxt)), left - 1
+
     order, seen = [], set()
 
-    def walk(wid, left):
+    def walk(wid):
         if wid in seen:
             return
         seen.add(wid)
-        dependencies = []
-        if left > 0:
-            try:
-                dependencies = requires(wid)
-            except Blocked as error:
-                print("  ~ %s: chưa kiểm được mod bắt buộc (%s) - vẫn cài tiếp" % (wid, error))
-        for dependency in dependencies:
-            walk(dependency, left - 1)
+        for dependency in graph.get(wid, ()):
+            walk(dependency)
         order.append(wid)
 
     for wid in ids:
-        walk(wid, depth)
+        walk(wid)
     return order
 
 
@@ -676,32 +708,61 @@ def _search_modid_candidates(modid):
     return candidates
 
 
-def _resolve_modid(modid, cache):
-    print("đang dò mod bắt buộc: %s" % modid)
-    key = _require_id(modid).casefold()
-    if key in cache:
-        wid = cache[key]
-        if wid is None:
+def _resolve_modids(modids, cache):
+    """Resolve several mod ids to workshop ids, sharing steamcmd sessions.
+
+    Two sessions at most for the whole batch instead of two per mod id: the
+    remembered ids are verified together, then every search candidate is fetched
+    together. Order of the returned pairs follows the input.
+    """
+    wanted = []
+    for modid in modids:
+        key = _require_id(modid).casefold()
+        if key and not any(key == seen for seen, _ in wanted):
+            wanted.append((key, modid))
+    if not wanted:
+        return []
+    print("đang dò mod bắt buộc: %s" % ", ".join(modid for _, modid in wanted))
+
+    remembered = [cache[key] for key, _ in wanted if cache.get(key)]
+    verified = download_many(list(dict.fromkeys(remembered)), reuse=True) if remembered else {}
+
+    found, unresolved = {}, []
+    for key, modid in wanted:
+        wid = cache.get(key)
+        if key in cache and wid is None:
             print("không tìm thấy workshop id cho %s" % modid)
-            return None
-        sources = download_many([wid])
+            continue
         try:
-            if wid in sources and _source_provides_modid(sources[wid], modid):
+            if wid and wid in verified and _source_provides_modid(verified[wid], modid):
+                found[modid] = (wid, verified[wid])
                 print("đã tìm thấy %s (%s)" % (modid, wid))
-                return wid, sources[wid]
+                continue
         except OSError:
             pass
-        del cache[key]
+        cache.pop(key, None)
+        unresolved.append((key, modid))
 
-    candidates = _search_modid_candidates(modid)
-    sources = download_many(candidates) if candidates else {}
-    matched = _matching_candidate(modid, candidates, sources)
-    cache[key] = matched
-    if matched:
-        print("đã tìm thấy %s (%s)" % (modid, matched))
-    else:
-        print("không tìm thấy workshop id cho %s" % modid)
-    return (matched, sources[matched]) if matched else None
+    if unresolved:
+        searched = [(key, modid, _search_modid_candidates(modid)) for key, modid in unresolved]
+        pool = [wid for _, _, candidates in searched for wid in candidates]
+        sources = download_many(list(dict.fromkeys(pool)), reuse=True) if pool else {}
+        for key, modid, candidates in searched:
+            matched = _matching_candidate(modid, candidates, sources)
+            cache[key] = matched
+            if matched:
+                found[modid] = (matched, sources[matched])
+                print("đã tìm thấy %s (%s)" % (modid, matched))
+            else:
+                print("không tìm thấy workshop id cho %s" % modid)
+
+    return [(modid, found[modid][0], found[modid][1])
+            for _, modid in wanted if modid in found]
+
+
+def _resolve_modid(modid, cache):
+    resolved = _resolve_modids([modid], cache)
+    return (resolved[0][1], resolved[0][2]) if resolved else None
 
 
 def _index_sources(sources, providers):
@@ -740,6 +801,7 @@ def _expand_mod_dependencies(initial, sources, depth=4, state=None):
         except OSError as error:
             print("  ! %s: không đọc được mod.info (%s)" % (wid, error))
             required = []
+        pending = []
         for modid in required:
             provider = providers.get(modid.casefold())
             if provider:
@@ -747,31 +809,35 @@ def _expand_mod_dependencies(initial, sources, depth=4, state=None):
                 if provider in sources:
                     walk(provider, max(left - 1, 0))
                 continue
-            if left == 0:
-                continue
+            if left > 0:
+                pending.append(modid)
+        # every unknown mod id of this node resolves in one pass, so the whole
+        # node costs two steamcmd sessions instead of two per mod id
+        if pending:
             try:
-                resolved = _resolve_modid(modid, cache)
+                resolved = _resolve_modids(pending, cache)
             except (Blocked, OSError) as error:
-                print("  ! %s: không dò được workshop id (%s)" % (modid, error))
-                continue
-            if not resolved:
-                continue
-            provider, source = resolved
-            sources[provider] = source
-            _index_sources(sources, providers)
-            try:
-                title = details([provider]).get(provider, {}).get("title") or provider
-            except Exception:
-                title = provider
-            print("kèm mod bắt buộc: %s (%s)" % (title, provider))
-
-            workshop_order = with_deps([provider], left - 1)
-            needed = [item for item in workshop_order if item not in sources]
-            if needed:
-                sources.update(download_many(needed))
-                _index_sources(sources, providers)
-            for item in workshop_order:
-                walk(item, left - 1)
+                print("  ! %s: không dò được workshop id (%s)" % (", ".join(pending), error))
+                resolved = []
+            if resolved:
+                # the resolver may have read a stale copy off disk just to see
+                # which mod ids it provides; the install copy comes from the
+                # batched download below, never from that
+                added = [provider for _, provider, _ in resolved]
+                try:
+                    titles = details(added)
+                except Exception:
+                    titles = {}
+                for provider in added:
+                    print("kèm mod bắt buộc: %s (%s)"
+                          % (titles.get(provider, {}).get("title") or provider, provider))
+                workshop_order = with_deps(added, left - 1)
+                needed = [item for item in workshop_order if item not in sources]
+                if needed:
+                    sources.update(download_many(needed))
+                    _index_sources(sources, providers)
+                for item in workshop_order:
+                    walk(item, left - 1)
         order.append(wid)
 
     for wid in initial:
@@ -827,13 +893,21 @@ _revalidating = set()
 _revalidating_lock = threading.Lock()
 
 
-def _revalidate_bg(url):
+def _effective_gap(gap, now=None):
+    """Gap to honour right now, letting a rate-limit penalty expire on its own."""
+    now = time.time() if now is None else now
+    if _gap_floor[0] and now >= _gap_floor_until[0]:
+        _gap_floor[0] = 0.0
+    return max(gap, _gap_floor[0])
+
+
+def _revalidate_bg(url, gap=BROWSE_GAP):
     with _revalidating_lock:
         if url in _revalidating:
             return
         _revalidating.add(url)
     try:
-        _fetch_and_cache(url, is_foreground=False)
+        _fetch_and_cache(url, is_foreground=False, gap=gap)
     except Exception:
         pass
     finally:
@@ -841,7 +915,7 @@ def _revalidate_bg(url):
             _revalidating.discard(url)
 
 
-def _fetch_and_cache(url, is_foreground=True):
+def _fetch_and_cache(url, is_foreground=True, gap=BROWSE_GAP):
     path = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".html")
     if is_foreground:
         with _foreground_lock:
@@ -852,18 +926,18 @@ def _fetch_and_cache(url, is_foreground=True):
                 time.sleep(0.1)
                 continue
             with _hit_lock:
-                gap = BROWSE_GAP - (time.time() - _last_hit[0])
-                if gap > 0:
+                wait = _effective_gap(gap) - (time.time() - _last_hit[0])
+                if wait > 0:
                     if not is_foreground:
                         start = time.time()
-                        while time.time() - start < gap:
+                        while time.time() - start < wait:
                             if _foreground_active[0] > 0:
                                 break
-                            time.sleep(min(0.05, gap - (time.time() - start)))
+                            time.sleep(min(0.05, wait - (time.time() - start)))
                         if _foreground_active[0] > 0:
                             continue
                     else:
-                        time.sleep(gap)
+                        time.sleep(wait)
                 _last_hit[0] = time.time()
                 break
 
@@ -885,6 +959,9 @@ def _fetch_and_cache(url, is_foreground=True):
                 html, why = None, "Steam không trả trang workshop hợp lệ"
 
         if html is None:
+            if why is RATE_LIMITED:
+                _gap_floor[0] = BROWSE_GAP
+                _gap_floor_until[0] = time.time() + RATE_LIMIT_COOLDOWN
             raise Blocked(why)
 
         os.makedirs(CACHE_DIR, exist_ok=True)
@@ -897,7 +974,7 @@ def _fetch_and_cache(url, is_foreground=True):
                 _foreground_active[0] -= 1
 
 
-def cached_page(url, ttl=BROWSE_TTL):
+def cached_page(url, ttl=BROWSE_TTL, gap=BROWSE_GAP):
     """Return cached listing HTML, serving stale data when Steam blocks a refresh."""
     path = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".html")
 
@@ -921,11 +998,11 @@ def cached_page(url, ttl=BROWSE_TTL):
 
     stale = cached(False)
     if stale and ttl <= BROWSE_TTL:
-        threading.Thread(target=_revalidate_bg, args=(url,), daemon=True).start()
+        threading.Thread(target=_revalidate_bg, args=(url, gap), daemon=True).start()
         return stale
 
     try:
-        return _fetch_and_cache(url, is_foreground=True)
+        return _fetch_and_cache(url, is_foreground=True, gap=gap)
     except Blocked as error:
         if stale:
             return stale
@@ -980,7 +1057,7 @@ REQ_BLOCK = re.compile(r'id="RequiredItems".*?(?:<!--|rightSectionTopTitle)', re
 
 def requires(wid):
     """Scrape the workshop Required Items block for workshop ids."""
-    match = REQ_BLOCK.search(cached_page(ITEM_URL % wid, ttl=REQUIRES_TTL))
+    match = REQ_BLOCK.search(cached_page(ITEM_URL % wid, ttl=REQUIRES_TTL, gap=ITEM_GAP))
     if not match:
         return []
     out, seen = [], set()
@@ -989,6 +1066,39 @@ def requires(wid):
             seen.add(dependency)
             out.append(dependency)
     return out[:20]
+
+
+def requires_many(wids):
+    """Scrape several item pages at once; one blocked id never sinks the batch."""
+    wids = [wid for wid in dict.fromkeys(wids)]
+    if not wids:
+        return {}
+    if len(wids) == 1:
+        wid = wids[0]
+        try:
+            return {wid: requires(wid)}
+        except Blocked as error:
+            print("  ~ %s: chưa kiểm được mod bắt buộc (%s) - vẫn cài tiếp" % (wid, error))
+            return {}
+    out, lock = {}, threading.Lock()
+
+    def fetch(wid):
+        try:
+            found = requires(wid)
+        except Blocked as error:
+            print("  ~ %s: chưa kiểm được mod bắt buộc (%s) - vẫn cài tiếp" % (wid, error))
+            return
+        with lock:
+            out[wid] = found
+
+    workers = [threading.Thread(target=fetch, args=(wid,)) for wid in wids]
+    for index in range(0, len(workers), ITEM_WORKERS):
+        group = workers[index:index + ITEM_WORKERS]
+        for worker in group:
+            worker.start()
+        for worker in group:
+            worker.join()
+    return out
 
 
 def _listing_ids(html):
@@ -1242,6 +1352,65 @@ def check_cache():
         CACHE_DIR = keep
 
 
+def check_dependency_batching():
+    """Resolution must go level by level and share steamcmd sessions."""
+    global requires_many, download_many, steamcmd, _search_modid_candidates
+    keep = (requires_many, download_many, steamcmd, _search_modid_candidates)
+    floor = (_gap_floor[0], _gap_floor_until[0])
+    try:
+        _gap_floor[0], _gap_floor_until[0] = BROWSE_GAP, time.time() + 60
+        assert _effective_gap(ITEM_GAP) == BROWSE_GAP, "a 429 must slow every page down"
+        _gap_floor_until[0] = time.time() - 1
+        assert _effective_gap(ITEM_GAP) == ITEM_GAP, "the penalty must expire on its own"
+        assert _gap_floor[0] == 0.0
+
+        graph = {"1": ["2", "3"], "2": ["4"], "3": ["4"]}
+        levels = []
+
+        def fake_requires_many(wids):
+            wids = list(dict.fromkeys(wids))
+            levels.append(wids)
+            return {wid: graph.get(wid, []) for wid in wids}
+
+        requires_many = fake_requires_many
+        assert with_deps(["1"]) == ["4", "2", "3", "1"]
+        # depth-first would have been four round trips: 1, 2, 4, 3
+        assert levels == [["1"], ["2", "3"], ["4"]], levels
+        requires_many = keep[0]
+
+        with tempfile.TemporaryDirectory(prefix="pzmod-batch-") as root:
+            content = os.path.join(root, "steamapps", "workshop", "content", APPID)
+            sources = {}
+            for wid, modid in (("11", "A"), ("22", "B")):
+                folder = os.path.join(content, wid, "mods", "Fixture")
+                os.makedirs(folder)
+                with open(os.path.join(folder, "mod.info"), "w", encoding="utf-8") as info:
+                    info.write("id=%s\n" % modid)
+                sources[wid] = os.path.join(content, wid)
+            steamcmd = lambda: os.path.join(root, "steamcmd.exe")
+            # the stub exe cannot be spawned, so a steamcmd session here would raise
+            assert download_many(["11"], reuse=True) == {"11": sources["11"]}
+
+            calls = []
+
+            def fake_download_many(wids, force=False, labels=None, reuse=False):
+                calls.append(list(wids))
+                return {wid: sources[wid] for wid in wids if wid in sources}
+
+            download_many = fake_download_many
+            _search_modid_candidates = lambda modid: ["22"] if modid == "B" else []
+            cache = {"a": "11"}
+            with contextlib.redirect_stdout(io.StringIO()):
+                resolved = _resolve_modids(["A", "B"], cache)
+            assert resolved == [("A", "11", sources["11"]), ("B", "22", sources["22"])]
+            assert cache == {"a": "11", "b": "22"}
+            # one session to verify what we remembered, one for the search pool
+            assert calls == [["11"], ["22"]], calls
+    finally:
+        requires_many, download_many, steamcmd, _search_modid_candidates = keep
+        _gap_floor[0], _gap_floor_until[0] = floor
+
+
 def check_mod_transactions():
     """Exercise update/remove safety against a throwaway PZ user tree."""
     global USER, MODS, OFF, STATE, download, write_state
@@ -1378,6 +1547,7 @@ def cmd_selftest(args):
         assert _missing_modids(required, modids) == ["A", "B", "Other"]
     check_mod_transactions()
     check_cache()
+    check_dependency_batching()
     try:
         assert len(browse(sort="trend")) > 10, "workshop browse layout changed"
     except Blocked as error:
