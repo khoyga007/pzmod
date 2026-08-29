@@ -538,8 +538,24 @@ fn check_folder(folder: &str) -> Result<String, String> {
     if f.is_empty() || f == "." || f == ".." {
         return Err(format!("Tên thư mục không hợp lệ: {folder:?}"));
     }
-    if f.contains('/') || f.contains('\\') || f.contains(':') {
+    // The lookalikes are not separators to Windows, so they cannot escape the
+    // directory — they are refused here only so a bad name fails with a clear
+    // message instead of an opaque fs::rename error two calls later.
+    if f.contains([
+        '/', '\\', ':', '\0', '\u{2215}', '\u{FF0F}', '\u{FF3C}', '\u{FF1A}',
+    ]) {
         return Err(format!("Tên thư mục không được chứa đường dẫn: {folder:?}"));
+    }
+    // CON, NUL, COM1… are devices, not files. Creating one succeeds and then
+    // behaves like a device; refuse before the rename touches it.
+    let stem = f.split('.').next().unwrap_or(f).to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || matches!(stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT")),
+                    Some(n) if matches!(n, "1"|"2"|"3"|"4"|"5"|"6"|"7"|"8"|"9"));
+    if reserved {
+        return Err(format!(
+            "Tên thư mục trùng tên thiết bị Windows: {folder:?}"
+        ));
     }
     if Path::new(f).components().count() != 1 {
         return Err(format!("Tên thư mục không hợp lệ: {folder:?}"));
@@ -650,10 +666,16 @@ fn state() -> Result<State, String> {
 #[derive(Serialize)]
 struct Done {
     ok: bool,
-    log: String,
+    // A LIST, not a string: pzmod_gui.py answers /api/enable with
+    // {"log": ["bật X"]} and ui.html calls .map() on it. One string here makes
+    // showLog() throw after a toggle that actually succeeded.
+    log: Vec<String>,
 }
 
+/// Every mover goes through check_folder, not just the two webview commands —
+/// bisect feeds names straight out of .pzbisect.json, which a user can edit.
 fn move_folder(from: &Path, to: &Path, folder: &str, verb: &str) -> Result<Done, String> {
+    let folder = &check_folder(folder)?;
     let src = from.join(folder);
     let dst = to.join(folder);
 
@@ -665,7 +687,7 @@ fn move_folder(from: &Path, to: &Path, folder: &str, verb: &str) -> Result<Done,
     if is_dir(&dst) {
         return Ok(Done {
             ok: true,
-            log: format!("'{folder}' đã {verb} sẵn."),
+            log: vec![format!("'{folder}' đã {verb} sẵn.")],
         });
     }
     if !is_dir(&src) {
@@ -676,7 +698,7 @@ fn move_folder(from: &Path, to: &Path, folder: &str, verb: &str) -> Result<Done,
     fs::rename(&src, &dst).map_err(|e| format!("Không {verb} được '{folder}': {e}"))?;
     Ok(Done {
         ok: true,
-        log: format!("Đã {verb} '{folder}'."),
+        log: vec![format!("Đã {verb} '{folder}'.")],
     })
 }
 
@@ -722,7 +744,7 @@ fn installed_folders_rs(user: &Path) -> Result<Vec<(String, bool)>, String> {
     for f in &off_set {
         res.push((f.clone(), false));
     }
-    res.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    res.sort_by_key(|a| a.0.to_lowercase());
     Ok(res)
 }
 
@@ -822,7 +844,7 @@ fn bisect_start_internal(names: Option<Vec<String>>, user: &Path) -> Result<Valu
         .filter(|(_, &en)| en)
         .map(|(k, _)| k.clone())
         .collect();
-    original_enabled.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    original_enabled.sort_by_key(|a| a.to_lowercase());
 
     let mut candidates: Vec<String> = match names {
         None => original_enabled.clone(),
@@ -847,8 +869,8 @@ fn bisect_start_internal(names: Option<Vec<String>>, user: &Path) -> Result<Valu
         ));
     }
 
-    candidates.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-    let mid = (candidates.len() + 1) / 2;
+    candidates.sort_by_key(|a| a.to_lowercase());
+    let mid = candidates.len().div_ceil(2);
     let left = candidates[..mid].to_vec();
     let right = candidates[mid..].to_vec();
 
@@ -870,8 +892,8 @@ fn bisect_start_internal(names: Option<Vec<String>>, user: &Path) -> Result<Valu
     });
 
     let tmp = user.join(".pzbisect.json.tmp");
-    let json_text = serde_json::to_string_pretty(&st)
-        .map_err(|e| format!("Không serialize được JSON: {e}"))?;
+    let json_text =
+        serde_json::to_string_pretty(&st).map_err(|e| format!("Không serialize được JSON: {e}"))?;
     fs::write(&tmp, json_text).map_err(|e| format!("Không ghi được file tạm: {e}"))?;
     fs::rename(&tmp, &state_file).map_err(|e| format!("Không lưu được file trạng thái: {e}"))?;
 
@@ -886,8 +908,8 @@ fn bisect_mark_internal(bad: bool, user: &Path) -> Result<Value, String> {
 
     let text = fs::read_to_string(&state_file)
         .map_err(|e| format!("Không đọc được .pzbisect.json: {e}"))?;
-    let mut st: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("JSON không hợp lệ: {e}"))?;
+    let mut st: Value =
+        serde_json::from_str(&text).map_err(|e| format!("JSON không hợp lệ: {e}"))?;
 
     if st.get("done").and_then(Value::as_bool).unwrap_or(false) {
         return bisect_view_internal(user);
@@ -930,8 +952,8 @@ fn bisect_mark_internal(bad: bool, user: &Path) -> Result<Value, String> {
         st["done"] = json!(true);
     } else {
         let round = st.get("round").and_then(Value::as_u64).unwrap_or(1) + 1;
-        new_candidates.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-        let mid = (new_candidates.len() + 1) / 2;
+        new_candidates.sort_by_key(|a| a.to_lowercase());
+        let mid = new_candidates.len().div_ceil(2);
         let left = new_candidates[..mid].to_vec();
         let right = new_candidates[mid..].to_vec();
 
@@ -949,8 +971,8 @@ fn bisect_mark_internal(bad: bool, user: &Path) -> Result<Value, String> {
     }
 
     let tmp = user.join(".pzbisect.json.tmp");
-    let json_text = serde_json::to_string_pretty(&st)
-        .map_err(|e| format!("Không serialize được JSON: {e}"))?;
+    let json_text =
+        serde_json::to_string_pretty(&st).map_err(|e| format!("Không serialize được JSON: {e}"))?;
     fs::write(&tmp, json_text).map_err(|e| format!("Không ghi được file tạm: {e}"))?;
     fs::rename(&tmp, &state_file).map_err(|e| format!("Không lưu được file trạng thái: {e}"))?;
 
@@ -969,8 +991,7 @@ fn bisect_stop_internal(user: &Path) -> Result<Value, String> {
 
     let text = fs::read_to_string(&state_file)
         .map_err(|e| format!("Không đọc được .pzbisect.json: {e}"))?;
-    let st: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("JSON không hợp lệ: {e}"))?;
+    let st: Value = serde_json::from_str(&text).map_err(|e| format!("JSON không hợp lệ: {e}"))?;
 
     let orig_arr = match st.get("original_enabled").and_then(Value::as_array) {
         Some(arr) => arr,
@@ -1102,9 +1123,37 @@ mod tests {
     fn folder_names_are_sandboxed() {
         assert!(check_folder("ZBPopFix").is_ok());
         assert!(check_folder("  ZBPopFix  ").is_ok());
-        for bad in ["", ".", "..", "../evil", r"..\evil", r"C:\Windows", "a/b"] {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../evil",
+            r"..\evil",
+            r"C:\Windows",
+            "a/b",
+            "CON",
+            "nul",
+            "Com1.txt",
+            "LPT9",
+            "ab\0cd",
+            "a\u{2215}b",
+            "a\u{FF3C}b",
+        ] {
             assert!(check_folder(bad).is_err(), "phải chặn: {bad:?}");
         }
+        // COM10 is not a device — only COM1..COM9 are.
+        assert!(check_folder("COM10").is_ok());
+    }
+
+    #[test]
+    fn move_folder_rejects_names_from_a_hand_edited_state_file() {
+        let base = std::env::temp_dir().join(format!("pzmod-state-{}", std::process::id()));
+        let mods = base.join("mods");
+        let off = base.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+        assert!(move_folder(&mods, &off, r"..\evil", "tắt").is_err());
+        assert!(move_folder(&mods, &off, "sub/ModA", "tắt").is_err());
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -1162,7 +1211,11 @@ mod tests {
         fs::create_dir_all(mods.join("ModB")).unwrap();
 
         let state_file = base.join(".pzbisect.json");
-        fs::write(&state_file, r#"{"round": 1, "candidates": ["ModA", "ModB"]}"#).unwrap();
+        fs::write(
+            &state_file,
+            r#"{"round": 1, "candidates": ["ModA", "ModB"]}"#,
+        )
+        .unwrap();
 
         // Must refuse to stop and not touch filesystem
         assert!(bisect_stop_internal(&base).is_err());

@@ -852,7 +852,10 @@ function showLog(res) {
     box.setAttribute("role", "status");
     document.body.appendChild(box);
   }
-  const lines = (res.log || []).concat(res.error ? ["ERROR: " + res.error] : []);
+  // Backends differ: Python sends log as a list, a Rust command may send one
+  // string. Normalise, or .map() below throws on a call that actually worked.
+  const log = Array.isArray(res.log) ? res.log : res.log ? [res.log] : [];
+  const lines = log.concat(res.error ? ["ERROR: " + res.error] : []);
   box.innerHTML = `<button class="btn btn--quiet log__close" onclick="this.parentNode.remove()" aria-label="Đóng">${ICON.cross}</button>` +
     lines.map((l) => `<div class="log__line${/^\s*(!|ERROR)/.test(l) ? " log__line--bad" : ""}">${esc(l)}</div>`).join("");
   $("statNote").textContent = lines.length ? lines[lines.length - 1] : "";
@@ -1088,7 +1091,8 @@ async function openSheet(id) {
 
   const bits = [];
   if (d.children) bits.push(`COLLECTION — ${d.children} mod con`);
-  if (d.folder) bits.push("đã cài: mods\\" + d.folder);
+  if (d.folders && d.folders.length)
+    bits.push("đã cài: " + d.folders.map((f) => f.name).join(", "));
   bits.push(NUM(d.subs) + " sub", NUM(d.favorited) + " fav", KB(d.size),
     "cập nhật " + new Date(d.updated * 1000).toLocaleDateString("vi-VN"));
   if (d.modids && d.modids.length) bits.push("mod id: " + d.modids.join(", "));
@@ -1144,6 +1148,9 @@ async function bulkInstall() {
   const log = [];
   let done = 0, failed = 0;
   for (const id of jobs) {
+    // Một mod trước đó có thể đã kéo theo mod này như phụ thuộc — bỏ qua,
+    // cài lại chỉ tốn thêm một lượt steamcmd.
+    if (state.installed[id]) { state.picked.delete(id); continue; }
     const name = (state.picked.get(id) || {}).title || id;
     busy(true, `đang cài ${done + 1}/${jobs.length}`);
     $("bulkGo").textContent = `Đang cài ${done + 1}/${jobs.length}…`;
