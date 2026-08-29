@@ -899,6 +899,56 @@ function cardHTML(it) {
 // steamcommunity.com bans an IP that scrapes too eagerly, and the ban hits the Steam
 // client too — so a listing already fetched this session is never fetched again.
 const pageCache = new Map();
+const inflight = new Map();   // key -> Promise; chống fetch trùng giữa "Tải thêm" và prefetch
+let gen = 0;                  // tăng mỗi load(); response gen cũ bị bỏ, không đè grid mới
+let idleTimer = null;         // prefetch trang kế sau 1.5s không có thao tác
+
+function fetchPage(key, p) {
+  if (pageCache.has(key)) return Promise.resolve(pageCache.get(key));
+  if (!inflight.has(key)) {
+    inflight.set(key, api("/api/browse?" + p).then((res) => {
+      pageCache.set(key, res.items);
+      return res.items;
+    }).finally(() => inflight.delete(key)));
+  }
+  return inflight.get(key);
+}
+
+function cancelPrefetch() {
+  clearTimeout(idleTimer);
+  idleTimer = null;
+}
+
+function schedulePrefetch() {
+  cancelPrefetch();
+  idleTimer = setTimeout(prefetchNext, 1500);
+}
+
+function prefetchNext() {
+  idleTimer = null;
+  const p = new URLSearchParams({ sort: state.sort, page: state.page, q: state.q });
+  if (state.tag) p.append("tag", state.tag);
+  if (state.days && hasWindow()) p.append("days", state.days);
+  const key = p.toString();
+  if (pageCache.has(key) || inflight.has(key)) return;
+  fetchPage(key, p).catch(() => {});   // best-effort: hỏng thì "Tải thêm" vẫn tự fetch lại
+}
+
+// Ariel: POST /api/prefetch {ids} — ủ ấm trang dependency trước khi user bấm cài.
+function hookPrefetch(items) {
+  const ids = items.map((it) => it.id).filter(Boolean);
+  if (!ids.length) return;
+  fetch("/api/prefetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  }).catch(() => {});   // warm cache là nền; lỗi không đáng làm phiền user
+}
+
+// Bất kỳ thao tác nào cũng huỷ prefetch đang chờ — chỉ prefetch khi user ngồi yên.
+document.addEventListener("click", cancelPrefetch, true);
+document.addEventListener("keydown", cancelPrefetch, true);
+document.addEventListener("input", cancelPrefetch, true);
 
 // "Mới nhất" is already chronological and a search is ranked by relevance, so
 // Steam ignores the window on both — the picker hides rather than lying.
@@ -922,28 +972,33 @@ function syncDaySeg() {
 }
 
 async function load(reset) {
-  if (state.busy) return;
+  cancelPrefetch();
+  const myGen = ++gen;
+  if (reset) { state.page = 1; $("grid").innerHTML = ""; }
   state.busy = true;
   $("more").disabled = true;
   $("more").innerHTML = '<span class="spin"></span> đang tải';
-  if (reset) { state.page = 1; $("grid").innerHTML = ""; }
   try {
     const p = new URLSearchParams({ sort: state.sort, page: state.page, q: state.q });
     if (state.tag) p.append("tag", state.tag);
     if (state.days && hasWindow()) p.append("days", state.days);
     const key = p.toString();
-    if (!pageCache.has(key)) pageCache.set(key, (await api("/api/browse?" + p)).items);
-    const items = pageCache.get(key);
+    const items = await fetchPage(key, p);
+    if (myGen !== gen) return;   // có load() mới hơn đã nhận quyền vẽ grid
     $("grid").insertAdjacentHTML("beforeend", items.map(cardHTML).join(""));
     $("empty").hidden = $("grid").children.length > 0;
     $("more").hidden = items.length === 0;
     state.page++;
+    schedulePrefetch();
+    hookPrefetch(items);
   } catch (e) {
-    showLog({ ok: false, error: e.message });
+    if (myGen === gen) showLog({ ok: false, error: e.message });
   } finally {
-    state.busy = false;
-    $("more").disabled = false;
-    $("more").textContent = "Tải thêm";
+    if (myGen === gen) {
+      state.busy = false;
+      $("more").disabled = false;
+      $("more").textContent = "Tải thêm";
+    }
   }
 }
 
@@ -996,6 +1051,19 @@ function folderRow(f, id, title, size) {
   </div>`;
 }
 
+// P4: nút "thiếu mod" nhảy sang Workshop và tìm theo tên (gạch dưới -> khoảng trắng).
+function jumpToWorkshop(text) {
+  state.q = String(text || "").replace(/_/g, " ");
+  state.tag = "";
+  state.sort = "trend";
+  state.days = "";
+  syncDaySeg();
+  $("q").value = state.q;
+  $("chips").querySelectorAll(".chip").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.tag === "")));
+  setTab("browse");
+  load(true);
+}
+
 function renderHave() {
   const list = Object.entries(state.installed).sort((a, b) => a[1].title.localeCompare(b[1].title));
   $("haveCount").textContent = list.length || "";
@@ -1007,9 +1075,21 @@ function renderHave() {
 
   const miss = state.missing || [];
   $("missBar").hidden = miss.length === 0;
-  $("missText").textContent = miss.length
-    ? `Thiếu mod bắt buộc: ${miss.join(", ")} — mod cần chúng sẽ không chạy. Tìm trên Workshop rồi cài thêm.`
-    : "";
+  $("missText").innerHTML = "";
+  if (miss.length) {
+    $("missText").appendChild(document.createTextNode("Thiếu mod bắt buộc: "));
+    miss.forEach((m, i) => {
+      if (i) $("missText").appendChild(document.createTextNode(", "));
+      const b = document.createElement("button");
+      b.className = "chip";
+      b.type = "button";
+      b.textContent = m;
+      b.title = "Tìm '" + m + "' trên Workshop";
+      b.addEventListener("click", () => jumpToWorkshop(m));
+      $("missText").appendChild(b);
+    });
+    $("missText").appendChild(document.createTextNode(" — bấm để tìm rồi cài thêm."));
+  }
 
   const loose = state.loose || [];
   $("looseHead").hidden = loose.length === 0;
