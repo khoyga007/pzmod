@@ -39,10 +39,18 @@ STATE = os.path.join(USER, ".pzmod.json")
 
 | who | files | scope |
 |---|---|---|
-| Claire | CONTRACT.md, git, integration, final review | this doc; merges; reports to Yang |
-| Celine | `pzmod.py` | core CLI: search/info/install/remove/list/update/deps/selftest |
-| Ariel | `pzbisect.py` + `pzmod.py::bisect` hook | enable/disable + binary-search culprit finder + own selftest |
-| Selica | `pzmod_gui.py`, `ui.html` | web UI: detail sheet, batch install, enable/disable toggles, bisect panel |
+| Claire | CONTRACT.md, git, integration, final review | this doc; merges; reports to Yang; measures and diagnoses, then hands the fix out |
+| Celine | `pzmod.py`, `pzmod-rs/src/main.rs` | core CLI + its Rust twin: search/info/install/remove/list/update/deps/selftest |
+| Ariel | `pzbisect.py` + `pzmod.py::bisect` hook + Rust `bisect` | enable/disable + binary-search culprit finder + own selftest; plus scrape-budget and rate-limit audit |
+| Selica | `pzmod_gui.py`, `ui.html`, `pzmod-rs/ui/` | web UI: detail sheet, batch install, enable/disable toggles, bisect panel, launch button |
+
+The Rust lane had no owner until 30/08/2026, which is how Claire ended up writing
+it alone. It is a hand-kept twin of `pzmod.py`: same owner, same review.
+
+**Nobody edits someone else's file without that owner saying so on the bridge.**
+Claire diagnosing is not Claire implementing: a measurement goes to the bridge
+with the numbers attached, and the owner writes the fix. Claire may commit
+directly only for CONTRACT.md, merges, and one-to-two-line obvious repairs.
 
 Copies of ddmod GUI already staged in this folder as `pzmod_gui.py` + `ui.html` + `tokens.css` (still DD-branded — Selica rewrites).
 
