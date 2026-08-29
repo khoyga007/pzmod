@@ -1,16 +1,17 @@
 // pzmod — Project Zomboid workshop mod manager (Rust + Tauri 2).
-// Port in progress: filesystem lane (list / enable / disable) is live here;
-// workshop browse + steamcmd install still live in pzmod.py. See ROUTES.md.
+// All routes used by ui.html are native here; pzmod.py remains the CLI twin.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -34,6 +35,17 @@ const SORTS: &[&str] = &[
     "totaluniquesubscriptions",
     "mostrecent",
     "textsearch",
+];
+const SORT_LABELS: &[(&str, &str)] = &[
+    ("trend", "Thịnh hành tuần"),
+    ("totaluniquesubscriptions", "Nhiều sub nhất"),
+    ("mostrecent", "Mới nhất"),
+    ("textsearch", "Khớp từ khoá"),
+];
+const STEAMCMD_CANDIDATES: &[&str] = &[
+    r"C:\WorkshopDL\steamcmd\steamcmd.exe",
+    r"E:\steamcmd\steamcmd.exe",
+    r"C:\steamcmd\steamcmd.exe",
 ];
 const TAGS: &[&str] = &[
     "Build 40",
@@ -95,6 +107,13 @@ fn paths() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let mods = user.join("mods");
     let off = user.join("mods_off");
     (game, user, mods, off)
+}
+
+fn work_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    static WORK: OnceLock<Mutex<()>> = OnceLock::new();
+    WORK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Khoá thao tác mod bị lỗi".to_string())
 }
 
 fn http_agent() -> &'static ureq::Agent {
@@ -407,6 +426,364 @@ fn managed_state(user: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+fn transaction_dir(user: &Path, label: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(user).map_err(|e| format!("Không tạo được {}: {e}", user.display()))?;
+    for attempt in 0..20 {
+        let path = user.join(format!(
+            ".pzmod-{label}-{}-{}-{attempt}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Không tạo được transaction: {error}")),
+        }
+    }
+    Err("Không tạo được tên transaction duy nhất".into())
+}
+
+fn write_managed_state(user: &Path, state: &Map<String, Value>) -> Result<(), String> {
+    fs::create_dir_all(user).map_err(|e| format!("Không tạo được {}: {e}", user.display()))?;
+    let path = user.join(".pzmod.json");
+    let suffix = format!("{}-{}", std::process::id(), unique_suffix());
+    let temporary = user.join(format!(".pzmod.json.tmp-{suffix}"));
+    let backup = user.join(format!(".pzmod.json.bak-{suffix}"));
+    let body = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Không serialize được .pzmod.json: {e}"))?;
+    fs::write(&temporary, body).map_err(|e| format!("Không ghi được state tạm: {e}"))?;
+
+    let had_state = path.is_file();
+    if had_state {
+        if let Err(error) = fs::rename(&path, &backup) {
+            fs::remove_file(&temporary).ok();
+            return Err(format!("Không backup được .pzmod.json: {error}"));
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        if had_state {
+            fs::rename(&backup, &path).map_err(|rollback| {
+                format!(
+                    "Không lưu được state ({error}) và không khôi phục được {} ({rollback})",
+                    backup.display()
+                )
+            })?;
+        }
+        return Err(format!("Không lưu được .pzmod.json: {error}"));
+    }
+    if had_state {
+        fs::remove_file(backup).ok();
+    }
+    Ok(())
+}
+
+fn entry_folders(entry: &Value) -> Vec<String> {
+    entry
+        .get("folders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn entry_complete(entry: &Value, mods: &Path, off: &Path) -> bool {
+    let folders = entry_folders(entry);
+    !folders.is_empty()
+        && folders
+            .iter()
+            .all(|folder| matches!(folder_status_at(mods, off, folder), "enabled" | "disabled"))
+}
+
+fn normalize_required(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches(['\\', '/'])
+        .trim()
+        .to_string()
+}
+
+fn missing_modids(state: &Map<String, Value>, mods: &Path, off: &Path) -> Vec<String> {
+    let mut supplied = HashSet::new();
+    for entry in state.values() {
+        if entry_folders(entry)
+            .iter()
+            .any(|folder| matches!(folder_status_at(mods, off, folder), "enabled" | "disabled"))
+        {
+            if let Some(modids) = entry.get("modids").and_then(Value::as_array) {
+                supplied.extend(
+                    modids
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|value| value.to_lowercase()),
+                );
+            }
+        }
+    }
+    let mut required = BTreeMap::new();
+    for value in state
+        .values()
+        .filter_map(|entry| entry.get("require").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let value = normalize_required(value);
+        if !value.is_empty() {
+            required.entry(value.to_lowercase()).or_insert(value);
+        }
+    }
+    required
+        .into_iter()
+        .filter_map(|(key, value)| (!supplied.contains(&key)).then_some(value))
+        .collect()
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir(destination)
+        .map_err(|e| format!("Không tạo được {}: {e}", destination.display()))?;
+    let mut entries: Vec<_> = fs::read_dir(source)
+        .map_err(|e| format!("Không đọc được {}: {e}", source.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Không đọc được {}: {e}", source.display()))?;
+    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+    for entry in entries {
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("Không đọc được loại file {}: {e}", from.display()))?;
+        if kind.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if kind.is_file() {
+            fs::copy(&from, &to).map_err(|e| format!("Không copy được {}: {e}", from.display()))?;
+        } else {
+            return Err(format!(
+                "Không hỗ trợ symlink trong mod: {}",
+                from.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rollback_files(installed: &[PathBuf], moved: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    for path in installed.iter().rev() {
+        if path.is_dir() {
+            fs::remove_dir_all(path)
+                .map_err(|e| format!("Không dọn được {}: {e}", path.display()))?;
+        } else if path.exists() {
+            return Err(format!(
+                "Đích rollback không còn là thư mục: {}",
+                path.display()
+            ));
+        }
+    }
+    for (backup, original) in moved.iter().rev() {
+        if backup.is_dir() {
+            if original.exists() {
+                return Err(format!("Đích rollback đã tồn tại: {}", original.display()));
+            }
+            fs::create_dir_all(original.parent().expect("folder has a parent"))
+                .map_err(|e| format!("Không tạo được thư mục rollback: {e}"))?;
+            fs::rename(backup, original)
+                .map_err(|e| format!("Không khôi phục được {}: {e}", original.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn steamcmd_exe() -> Result<PathBuf, String> {
+    for candidate in STEAMCMD_CANDIDATES {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            for name in ["steamcmd.exe", "steamcmd"] {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    Err("Không tìm thấy steamcmd.exe".into())
+}
+
+fn steamcmd_args(id: &str) -> Vec<OsString> {
+    [
+        "+login",
+        "anonymous",
+        "+workshop_download_item",
+        APPID,
+        id,
+        "+quit",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
+}
+
+fn download_item(id: &str, force: bool) -> Result<PathBuf, String> {
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Workshop id không hợp lệ".into());
+    }
+    let executable = steamcmd_exe()?;
+    let workshop = executable
+        .parent()
+        .ok_or("steamcmd.exe không có thư mục cha")?
+        .join("steamapps")
+        .join("workshop");
+    let destination = workshop.join("content").join(APPID).join(id);
+    if force {
+        if destination.is_dir() {
+            fs::remove_dir_all(&destination)
+                .map_err(|e| format!("Không dọn được cache {}: {e}", destination.display()))?;
+        }
+        let manifest = workshop.join(format!("appworkshop_{APPID}.acf"));
+        if manifest.is_file() {
+            fs::remove_file(&manifest)
+                .map_err(|e| format!("Không dọn được {}: {e}", manifest.display()))?;
+        }
+    }
+    let output = Command::new(&executable)
+        .args(steamcmd_args(id))
+        .output()
+        .map_err(|e| format!("Không chạy được steamcmd: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("Success. Downloaded item") && !destination.is_dir() {
+        let tail = stdout
+            .lines()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(format!("steamcmd thất bại với {id}: {tail}"));
+    }
+    if !destination.is_dir() {
+        return Err(format!(
+            "steamcmd báo thành công nhưng thiếu {}",
+            destination.display()
+        ));
+    }
+    Ok(destination)
+}
+
+#[derive(Debug)]
+struct ModRoot {
+    folder: String,
+    root: PathBuf,
+    infos: Vec<PathBuf>,
+}
+
+fn collect_modinfo(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(root)
+        .map_err(|e| format!("Không đọc được {}: {e}", root.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Không đọc được {}: {e}", root.display()))?;
+    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+    let mut directories = Vec::new();
+    for entry in entries {
+        if entry.path().is_dir() {
+            directories.push(entry.path());
+        } else if entry.file_name() == "mod.info" {
+            out.push(entry.path());
+        }
+    }
+    for directory in directories {
+        collect_modinfo(&directory, out)?;
+    }
+    Ok(())
+}
+
+fn mod_roots(item: &Path) -> Result<Vec<ModRoot>, String> {
+    let mods = item.join("mods");
+    if !mods.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut entries: Vec<_> = fs::read_dir(&mods)
+        .map_err(|e| format!("Không đọc được {}: {e}", mods.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Không đọc được {}: {e}", mods.display()))?;
+    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+    let mut roots = Vec::new();
+    for entry in entries.into_iter().filter(|entry| entry.path().is_dir()) {
+        let folder = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "Tên thư mục mod không phải Unicode hợp lệ".to_string())?;
+        check_folder(&folder)?;
+        let mut infos = Vec::new();
+        collect_modinfo(&entry.path(), &mut infos)?;
+        if !infos.is_empty() {
+            roots.push(ModRoot {
+                folder,
+                root: entry.path(),
+                infos,
+            });
+        }
+    }
+    Ok(roots)
+}
+
+fn parse_modinfo(path: &Path) -> Result<HashMap<String, String>, String> {
+    let bytes = fs::read(path).map_err(|e| format!("Không đọc được {}: {e}", path.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() {
+                out.insert(key.to_string(), value.trim().to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn mod_metadata(roots: &[ModRoot]) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut modids = Vec::new();
+    let mut required = Vec::new();
+    let mut modid_keys = HashSet::new();
+    let mut required_keys = HashSet::new();
+    for info in roots.iter().flat_map(|root| &root.infos) {
+        let values = parse_modinfo(info)?;
+        if let Some(modid) = values.get("id") {
+            if !modid.is_empty() && modid_keys.insert(modid.to_lowercase()) {
+                modids.push(modid.clone());
+            }
+        }
+        for dependency in values
+            .get("require")
+            .into_iter()
+            .flat_map(|value| value.split(','))
+        {
+            let dependency = normalize_required(dependency);
+            if !dependency.is_empty() && required_keys.insert(dependency.to_lowercase()) {
+                required.push(dependency);
+            }
+        }
+    }
+    Ok((modids, required))
+}
+
 fn folder_status_at(mods: &Path, off: &Path, folder: &str) -> &'static str {
     if check_folder(folder).is_err() {
         return "invalid";
@@ -597,6 +974,14 @@ struct Folder {
 }
 
 #[derive(Serialize)]
+struct SortLabels {
+    trend: &'static str,
+    totaluniquesubscriptions: &'static str,
+    mostrecent: &'static str,
+    textsearch: &'static str,
+}
+
+#[derive(Serialize)]
 struct State {
     game: String,
     user: String,
@@ -606,16 +991,16 @@ struct State {
     installed: BTreeMap<String, serde_json::Value>,
     loose: Vec<Folder>,
     missing: Vec<String>,
-    sorts: Vec<serde_json::Value>,
+    sorts: SortLabels,
     tags: Vec<String>,
     bisect_ready: bool,
     /// Routes still served by pzmod.py; the UI greys those tabs out.
     ported: Vec<&'static str>,
 }
 
-#[tauri::command]
-fn state() -> Result<State, String> {
-    let (game, user, mods, off) = paths();
+fn state_internal(game: &Path, user: &Path) -> Result<State, String> {
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
     ensure_dirs(&mods, &off)?;
 
     let mut folders: Vec<Folder> = Vec::new();
@@ -646,21 +1031,68 @@ fn state() -> Result<State, String> {
     }
     folders.sort_by_key(|f| f.name.to_lowercase());
 
+    let managed = managed_state(user);
+    let mut installed = BTreeMap::new();
+    let mut known = HashSet::new();
+    for (id, entry) in &managed {
+        let folder_values: Vec<Value> = entry_folders(entry)
+            .into_iter()
+            .map(|name| {
+                known.insert(name.clone());
+                let status = folder_status_at(&mods, &off, &name);
+                json!({"name": name, "status": status})
+            })
+            .collect();
+        let present = folder_values.iter().any(|folder| {
+            matches!(
+                folder["status"].as_str(),
+                Some("enabled" | "disabled" | "collision")
+            )
+        });
+        installed.insert(
+            id.clone(),
+            json!({
+                "title": entry.get("title").and_then(Value::as_str).unwrap_or(id),
+                "size": value_u64(entry, "size"),
+                "updated": value_u64(entry, "updated"),
+                "modids": entry.get("modids").cloned().unwrap_or_else(|| json!([])),
+                "require": entry.get("require").cloned().unwrap_or_else(|| json!([])),
+                "folders": folder_values,
+                "present": present,
+            }),
+        );
+    }
+    folders.retain(|folder| !known.contains(&folder.name));
+
     Ok(State {
         game: game.display().to_string(),
         user: user.display().to_string(),
         mods: mods.display().to_string(),
         off: off.display().to_string(),
         appid: APPID,
-        // Workshop-owned entries need .pzmod.json + the Steam lane; not ported yet.
-        installed: BTreeMap::new(),
+        installed,
         loose: folders,
-        missing: Vec::new(),
-        sorts: Vec::new(),
-        tags: Vec::new(),
+        missing: missing_modids(&managed, &mods, &off),
+        sorts: SortLabels {
+            trend: SORT_LABELS[0].1,
+            totaluniquesubscriptions: SORT_LABELS[1].1,
+            mostrecent: SORT_LABELS[2].1,
+            textsearch: SORT_LABELS[3].1,
+        },
+        tags: TAGS.iter().map(|tag| (*tag).to_string()).collect(),
         bisect_ready: true,
-        ported: vec!["state", "enable", "disable", "browse", "detail", "bisect"],
+        ported: vec![
+            "state", "enable", "disable", "browse", "detail", "bisect", "install", "remove",
+            "update",
+        ],
     })
+}
+
+#[tauri::command]
+fn state() -> Result<State, String> {
+    let (game, user, _, _) = paths();
+    let _guard = work_guard()?;
+    state_internal(&game, &user)
 }
 
 #[derive(Serialize)]
@@ -704,6 +1136,7 @@ fn move_folder(from: &Path, to: &Path, folder: &str, verb: &str) -> Result<Done,
 
 #[tauri::command]
 fn enable(folder: String) -> Result<Done, String> {
+    let _guard = work_guard()?;
     let folder = check_folder(&folder)?;
     let (_, _, mods, off) = paths();
     ensure_dirs(&mods, &off)?;
@@ -712,10 +1145,451 @@ fn enable(folder: String) -> Result<Done, String> {
 
 #[tauri::command]
 fn disable(folder: String) -> Result<Done, String> {
+    let _guard = work_guard()?;
     let folder = check_folder(&folder)?;
     let (_, _, mods, off) = paths();
     ensure_dirs(&mods, &off)?;
     move_folder(&mods, &off, &folder, "tắt")
+}
+
+fn install_from_source(
+    id: &str,
+    detail: &Value,
+    source: &Path,
+    user: &Path,
+) -> Result<Vec<String>, String> {
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+    ensure_dirs(&mods, &off)?;
+    let roots = mod_roots(source)?;
+    if roots.is_empty() {
+        return Err("không tìm thấy mods/<ModName>/mod.info".into());
+    }
+    let mut state = managed_state(user);
+    let previous = state.get(id).cloned().unwrap_or_else(|| json!({}));
+    let mut old_folders = entry_folders(&previous);
+    old_folders.sort_by_key(|folder| folder.to_lowercase());
+    old_folders.dedup();
+    let old_set: HashSet<_> = old_folders.iter().cloned().collect();
+    let mut old_locations = HashMap::new();
+
+    for folder in &old_folders {
+        let folder = check_folder(folder)?;
+        let enabled = mods.join(&folder);
+        let disabled = off.join(&folder);
+        if enabled.is_dir() && disabled.is_dir() {
+            return Err(format!(
+                "{folder} có ở cả mods và mods_off; giữ nguyên để người dùng xử lý"
+            ));
+        }
+        if [enabled.as_path(), disabled.as_path()]
+            .iter()
+            .any(|path| path.exists() && !path.is_dir())
+        {
+            return Err(format!("{folder} trùng với một file; giữ nguyên"));
+        }
+        if enabled.is_dir() {
+            old_locations.insert(folder, mods.clone());
+        } else if disabled.is_dir() {
+            old_locations.insert(folder, off.clone());
+        }
+    }
+
+    for root in &roots {
+        if !old_set.contains(&root.folder)
+            && [mods.join(&root.folder), off.join(&root.folder)]
+                .iter()
+                .any(|path| path.exists())
+        {
+            return Err(format!(
+                "thư mục {} đã tồn tại và không thuộc bản cài này",
+                root.folder
+            ));
+        }
+    }
+
+    let (modids, required) = mod_metadata(&roots)?;
+    let transaction = transaction_dir(user, &format!("install-{id}"))?;
+    let staged = transaction.join("new");
+    let backup = transaction.join("old");
+    if let Err(error) = fs::create_dir(&staged) {
+        fs::remove_dir_all(&transaction).ok();
+        return Err(format!("Không tạo được staging: {error}"));
+    }
+    let mut installed = Vec::new();
+    let mut moved = Vec::new();
+    let mut preserved = Vec::new();
+
+    let result = (|| -> Result<(), String> {
+        for root in &roots {
+            copy_tree(&root.root, &staged.join(&root.folder))?;
+        }
+        for folder in &old_folders {
+            for (label, base) in [("mods", &mods), ("mods_off", &off)] {
+                let original = base.join(folder);
+                if original.is_dir() {
+                    let saved = backup.join(label).join(folder);
+                    fs::create_dir_all(saved.parent().expect("backup has parent"))
+                        .map_err(|e| format!("Không tạo được backup: {e}"))?;
+                    fs::rename(&original, &saved)
+                        .map_err(|e| format!("Không backup được {}: {e}", original.display()))?;
+                    moved.push((saved, original));
+                }
+            }
+        }
+
+        let new_folders: HashSet<_> = roots.iter().map(|root| root.folder.clone()).collect();
+        for root in &roots {
+            let base = old_locations.get(&root.folder).unwrap_or(&mods);
+            let destination = base.join(&root.folder);
+            fs::rename(staged.join(&root.folder), &destination)
+                .map_err(|e| format!("Không cài được thư mục {}: {e}", root.folder))?;
+            installed.push(destination);
+        }
+        for folder in old_set.difference(&new_folders) {
+            let Some(base) = old_locations.get(folder) else {
+                continue;
+            };
+            let label = if base == &mods { "mods" } else { "mods_off" };
+            let saved = backup.join(label).join(folder);
+            let destination = off.join(folder);
+            installed.push(destination.clone());
+            copy_tree(&saved, &destination)?;
+            preserved.push(folder.clone());
+        }
+
+        let title = value_string(detail, "title");
+        let title = if title.is_empty() {
+            id.to_string()
+        } else {
+            title
+        };
+        state.insert(
+            id.to_string(),
+            json!({
+                "title": title,
+                "updated": value_u64(detail, "time_updated"),
+                "size": value_u64(detail, "file_size"),
+                "folders": roots.iter().map(|root| root.folder.clone()).collect::<Vec<_>>(),
+                "modids": modids,
+                "require": required,
+            }),
+        );
+        write_managed_state(user, &state)
+    })();
+
+    if let Err(error) = result {
+        match rollback_files(&installed, &moved) {
+            Ok(()) => {
+                fs::remove_dir_all(&transaction).ok();
+                return Err(error);
+            }
+            Err(rollback) => {
+                return Err(format!(
+                    "{error}; KHÔNG KHÔI PHỤC ĐƯỢC, bản sao còn tại {} ({rollback})",
+                    transaction.display()
+                ));
+            }
+        }
+    }
+
+    let mut log = preserved
+        .into_iter()
+        .map(|folder| format!("! {folder} không còn trong bản mới, đã chuyển sang mods_off"))
+        .collect::<Vec<_>>();
+    log.push(format!(
+        "+ {} -> {} thư mục ({:.1} KB)",
+        value_string(detail, "title"),
+        roots.len(),
+        value_u64(detail, "file_size") as f64 / 1024.0
+    ));
+    if let Err(error) = fs::remove_dir_all(&transaction) {
+        log.push(format!(
+            "! Không dọn được transaction {}: {error}",
+            transaction.display()
+        ));
+    }
+    Ok(log)
+}
+
+fn install_one(id: &str, detail: &Value, force: bool, user: &Path) -> Result<Vec<String>, String> {
+    if value_u64(detail, "consumer_app_id") != 108600 {
+        return Err(format!(
+            "thuộc app {}, không phải Project Zomboid",
+            value_u64(detail, "consumer_app_id")
+        ));
+    }
+    let state = managed_state(user);
+    let previous = state.get(id);
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+    if previous.is_some_and(|entry| {
+        !force
+            && value_u64(entry, "updated") == value_u64(detail, "time_updated")
+            && entry_complete(entry, &mods, &off)
+    }) {
+        return Ok(vec![format!(
+            "= {} đã là bản mới nhất",
+            value_string(detail, "title")
+        )]);
+    }
+    let source = download_item(id, previous.is_some() || force)?;
+    install_from_source(id, detail, &source, user)
+}
+
+fn walk_dependencies(
+    id: &str,
+    depth: usize,
+    seen: &mut HashSet<String>,
+    order: &mut Vec<String>,
+    log: &mut Vec<String>,
+) {
+    if !seen.insert(id.to_string()) {
+        return;
+    }
+    if depth > 0 {
+        match required_ids(id) {
+            Ok(required) => {
+                for dependency in required {
+                    walk_dependencies(&dependency, depth - 1, seen, order, log);
+                }
+            }
+            Err(error) => log.push(format!("! {id}: không dò được mod bắt buộc ({error})")),
+        }
+    }
+    order.push(id.to_string());
+}
+
+fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> {
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("bad id".into());
+    }
+    let original_meta = details(&[id.to_string()])?;
+    let mut todo = collection_children(id)?;
+    let mut log = Vec::new();
+    if todo.is_empty() {
+        todo.push(id.to_string());
+    } else {
+        log.push(format!(
+            "collection {}: {} mod",
+            original_meta
+                .get(id)
+                .map(|value| value_string(value, "title"))
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| id.to_string()),
+            todo.len()
+        ));
+    }
+    let requested: HashSet<_> = todo.iter().cloned().collect();
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    for item in todo {
+        walk_dependencies(&item, 4, &mut seen, &mut order, &mut log);
+    }
+    let extra: Vec<_> = order
+        .iter()
+        .filter(|item| !requested.contains(*item))
+        .cloned()
+        .collect();
+    if !extra.is_empty() {
+        let names = details(&extra)?;
+        log.push(format!(
+            "kèm {} mod bắt buộc: {}",
+            extra.len(),
+            extra
+                .iter()
+                .map(|item| {
+                    names
+                        .get(item)
+                        .map(|value| value_string(value, "title"))
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| item.clone())
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let metadata = details(&order)?;
+    let mut ok = true;
+    for item in order {
+        match metadata.get(&item) {
+            Some(detail) => match install_one(&item, detail, force, user) {
+                Ok(lines) => log.extend(lines),
+                Err(error) => {
+                    ok = false;
+                    log.push(format!("! {item}: {error}"));
+                }
+            },
+            None => {
+                ok = false;
+                log.push(format!("! {item}: mod đã bị xoá hoặc đặt riêng tư"));
+            }
+        }
+    }
+    let state = managed_state(user);
+    let missing = missing_modids(&state, &user.join("mods"), &user.join("mods_off"));
+    if !missing.is_empty() {
+        ok = false;
+        log.push(format!("! thiếu mod bắt buộc: {}", missing.join(", ")));
+    }
+    if log.iter().any(|line| line.trim_start().starts_with('!')) {
+        ok = false;
+    }
+    Ok(Done { ok, log })
+}
+
+fn remove_internal(id: &str, user: &Path) -> Result<Done, String> {
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("bad id".into());
+    }
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+    let mut state = managed_state(user);
+    let Some(entry) = state.get(id).cloned() else {
+        return Ok(Done {
+            ok: true,
+            log: vec![format!("? {id} chưa được pzmod cài")],
+        });
+    };
+    let mut paths = Vec::new();
+    for folder in entry_folders(&entry) {
+        let folder = check_folder(&folder)?;
+        for path in [mods.join(&folder), off.join(&folder)] {
+            if path.exists() && !path.is_dir() {
+                return Err(format!(
+                    "Từ chối xoá vì không phải thư mục: {}",
+                    path.display()
+                ));
+            }
+            if path.is_dir() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+
+    let transaction = transaction_dir(user, &format!("remove-{id}"))?;
+    let mut moved = Vec::new();
+    let result = (|| -> Result<(), String> {
+        for path in &paths {
+            let label = if path.parent() == Some(mods.as_path()) {
+                "mods"
+            } else {
+                "mods_off"
+            };
+            let saved =
+                transaction
+                    .join(label)
+                    .join(path.file_name().ok_or_else(|| {
+                        format!("Đường dẫn mod không hợp lệ: {}", path.display())
+                    })?);
+            fs::create_dir_all(saved.parent().expect("saved has parent"))
+                .map_err(|e| format!("Không tạo được transaction: {e}"))?;
+            fs::rename(path, &saved)
+                .map_err(|e| format!("Không staging được {}: {e}", path.display()))?;
+            moved.push((saved, path.clone()));
+        }
+        state.remove(id);
+        write_managed_state(user, &state)
+    })();
+
+    if let Err(error) = result {
+        match rollback_files(&[], &moved) {
+            Ok(()) => {
+                fs::remove_dir_all(&transaction).ok();
+                return Err(error);
+            }
+            Err(rollback) => {
+                return Err(format!(
+                    "{error}; KHÔNG KHÔI PHỤC ĐƯỢC, bản sao còn tại {} ({rollback})",
+                    transaction.display()
+                ));
+            }
+        }
+    }
+    let mut log = vec![format!(
+        "- {} đã xoá",
+        entry.get("title").and_then(Value::as_str).unwrap_or(id)
+    )];
+    let mut ok = true;
+    if let Err(error) = fs::remove_dir_all(&transaction) {
+        ok = false;
+        log.push(format!(
+            "! Đã gỡ state nhưng không dọn được {}: {error}",
+            transaction.display()
+        ));
+    }
+    Ok(Done { ok, log })
+}
+
+fn update_internal(user: &Path) -> Result<Done, String> {
+    let state = managed_state(user);
+    if state.is_empty() {
+        return Ok(Done {
+            ok: true,
+            log: vec!["không có mod để cập nhật".into()],
+        });
+    }
+    let ids: Vec<_> = state.keys().cloned().collect();
+    let metadata = details(&ids)?;
+    let mut log = Vec::new();
+    let mut ok = true;
+    for id in ids {
+        let entry = &state[&id];
+        let title = entry.get("title").and_then(Value::as_str).unwrap_or(&id);
+        match metadata.get(&id) {
+            None => {
+                ok = false;
+                log.push(format!(
+                    "! {title}: đã biến mất khỏi workshop, giữ nguyên bản cục bộ"
+                ));
+            }
+            Some(detail)
+                if value_u64(detail, "time_updated") == value_u64(entry, "updated")
+                    && entry_complete(entry, &user.join("mods"), &user.join("mods_off")) =>
+            {
+                log.push(format!("= {title}"));
+            }
+            Some(detail) => match install_one(&id, detail, true, user) {
+                Ok(lines) => log.extend(lines),
+                Err(error) => {
+                    ok = false;
+                    log.push(format!("! {title}: {error}"));
+                }
+            },
+        }
+    }
+    let refreshed = managed_state(user);
+    let missing = missing_modids(&refreshed, &user.join("mods"), &user.join("mods_off"));
+    if !missing.is_empty() {
+        ok = false;
+        log.push(format!("! thiếu mod bắt buộc: {}", missing.join(", ")));
+    }
+    if log.iter().any(|line| line.trim_start().starts_with('!')) {
+        ok = false;
+    }
+    Ok(Done { ok, log })
+}
+
+#[tauri::command]
+fn install(id: String, force: Option<bool>) -> Result<Done, String> {
+    let _guard = work_guard()?;
+    let (_, user, _, _) = paths();
+    install_internal(&id, force.unwrap_or(false), &user)
+}
+
+#[tauri::command]
+fn remove(id: String) -> Result<Done, String> {
+    let _guard = work_guard()?;
+    let (_, user, _, _) = paths();
+    remove_internal(&id, &user)
+}
+
+#[tauri::command]
+fn update() -> Result<Done, String> {
+    let _guard = work_guard()?;
+    let (_, user, _, _) = paths();
+    update_internal(&user)
 }
 
 fn installed_folders_rs(user: &Path) -> Result<Vec<(String, bool)>, String> {
@@ -1039,6 +1913,7 @@ fn bisect_stop_internal(user: &Path) -> Result<Value, String> {
 
 #[tauri::command]
 fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value, String> {
+    let _guard = work_guard()?;
     let (_, user, _, _) = paths();
     match op.as_deref().unwrap_or("view") {
         "view" | "" => bisect_view_internal(&user),
@@ -1066,7 +1941,7 @@ fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value, Strin
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            state, enable, disable, browse, detail, bisect
+            state, enable, disable, browse, detail, bisect, install, remove, update
         ])
         .run(tauri::generate_context!())
         .expect("pzmod: tauri failed to start");
@@ -1075,6 +1950,141 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_root(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "pzmod-rust-{label}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn steamcmd_argv_matches_python_lane() {
+        let args: Vec<_> = steamcmd_args("123")
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "+login",
+                "anonymous",
+                "+workshop_download_item",
+                "108600",
+                "123",
+                "+quit"
+            ]
+        );
+    }
+
+    #[test]
+    fn state_reads_the_python_schema() {
+        let user = test_root("state");
+        let mods = user.join("mods");
+        let off = user.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+        fs::create_dir(mods.join("Owned")).unwrap();
+        fs::create_dir(off.join("Loose")).unwrap();
+        let state = Map::from_iter([(
+            "10".into(),
+            json!({
+                "title": "Owned item", "updated": 2, "size": 3,
+                "folders": ["Owned"], "modids": ["OwnedID"], "require": ["MissingID"]
+            }),
+        )]);
+        write_managed_state(&user, &state).unwrap();
+
+        let snapshot = state_internal(Path::new(r"D:\ProjectZomboid"), &user).unwrap();
+        assert_eq!(snapshot.installed["10"]["title"], "Owned item");
+        assert_eq!(snapshot.installed["10"]["folders"][0]["status"], "enabled");
+        assert_eq!(snapshot.loose.len(), 1);
+        assert_eq!(snapshot.loose[0].name, "Loose");
+        assert_eq!(snapshot.missing, ["MissingID"]);
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["sorts"]["trend"], "Thịnh hành tuần");
+        assert!(json["tags"].as_array().unwrap().len() > 20);
+        fs::remove_dir_all(user).ok();
+    }
+
+    #[test]
+    fn install_preserves_disabled_and_retired_folders() {
+        let user = test_root("install");
+        let mods = user.join("mods");
+        let off = user.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+        fs::create_dir(off.join("Keep")).unwrap();
+        fs::write(off.join("Keep").join("old.txt"), "old").unwrap();
+        fs::create_dir(mods.join("Retired")).unwrap();
+        fs::write(mods.join("Retired").join("retired.txt"), "retired").unwrap();
+        write_managed_state(
+            &user,
+            &Map::from_iter([(
+                "10".into(),
+                json!({
+                    "title": "Old", "updated": 1, "size": 1,
+                    "folders": ["Keep", "Retired"], "modids": ["Old"], "require": []
+                }),
+            )]),
+        )
+        .unwrap();
+
+        let source = user.join("source");
+        fs::create_dir_all(source.join("mods").join("Keep").join("42.20")).unwrap();
+        fs::write(
+            source.join("mods").join("Keep").join("mod.info"),
+            "id=KeepID\nrequire=\\BaseID\n",
+        )
+        .unwrap();
+        fs::write(
+            source
+                .join("mods")
+                .join("Keep")
+                .join("42.20")
+                .join("mod.info"),
+            "id=keepid\nrequire=/OtherID\n",
+        )
+        .unwrap();
+        fs::write(source.join("mods").join("Keep").join("new.txt"), "new").unwrap();
+        let log = install_from_source(
+            "10",
+            &json!({
+                "title": "New", "time_updated": 2, "file_size": 100,
+                "consumer_app_id": 108600
+            }),
+            &source,
+            &user,
+        )
+        .unwrap();
+
+        assert!(off.join("Keep").join("new.txt").is_file());
+        assert!(!mods.join("Keep").exists());
+        assert!(off.join("Retired").join("retired.txt").is_file());
+        assert!(log.iter().any(|line| line.contains("Retired không còn")));
+        let state = managed_state(&user);
+        assert_eq!(state["10"]["folders"], json!(["Keep"]));
+        assert_eq!(state["10"]["modids"], json!(["KeepID"]));
+        assert_eq!(state["10"]["require"], json!(["BaseID", "OtherID"]));
+
+        fs::write(mods.join("Blocker"), "do not delete").unwrap();
+        let mut state = managed_state(&user);
+        state.get_mut("10").unwrap()["folders"] = json!(["Keep", "Blocker"]);
+        write_managed_state(&user, &state).unwrap();
+        assert!(remove_internal("10", &user).is_err());
+        assert!(off.join("Keep").is_dir());
+        assert!(managed_state(&user).contains_key("10"));
+        fs::remove_file(mods.join("Blocker")).unwrap();
+        remove_internal("10", &user).unwrap();
+        assert!(!off.join("Keep").exists());
+        assert!(!managed_state(&user).contains_key("10"));
+        assert!(
+            off.join("Retired").is_dir(),
+            "retired folder is loose, not deleted"
+        );
+        fs::remove_dir_all(user).ok();
+    }
 
     #[test]
     fn parses_cached_workshop_listing_fixture() {

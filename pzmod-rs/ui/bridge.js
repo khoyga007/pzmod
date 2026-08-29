@@ -13,6 +13,9 @@
     "/api/browse": "browse",
     "/api/detail": "detail",
     "/api/bisect": "bisect",
+    "/api/install": "install",
+    "/api/remove": "remove",
+    "/api/update": "update",
   };
 
   var NOT_YET = "Chức năng này chưa port sang bản Rust. Dùng pzmod-gui.bat (bản Python) cho tới khi xong.";
