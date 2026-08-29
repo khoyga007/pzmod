@@ -436,8 +436,8 @@ fn effective_gap(gap: Duration) -> Duration {
 }
 
 fn rate_limit_gap(is_foreground: bool, gap: Duration) {
-    let gap = effective_gap(gap);
     loop {
+        let current_gap = effective_gap(gap);
         if !is_foreground && FOREGROUND_FETCHING.load(Ordering::SeqCst) > 0 {
             thread::sleep(Duration::from_millis(100));
             continue;
@@ -446,7 +446,7 @@ fn rate_limit_gap(is_foreground: bool, gap: Duration) {
             static LAST_HIT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
             let mut last = LAST_HIT.get_or_init(|| Mutex::new(None)).lock().unwrap();
             if let Some(t) = *last {
-                if let Some(w) = gap.checked_sub(t.elapsed()) {
+                if let Some(w) = current_gap.checked_sub(t.elapsed()) {
                     Some(w)
                 } else {
                     *last = Some(Instant::now());
