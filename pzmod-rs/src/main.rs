@@ -642,8 +642,8 @@ fn state() -> Result<State, String> {
         missing: Vec::new(),
         sorts: Vec::new(),
         tags: Vec::new(),
-        bisect_ready: false,
-        ported: vec!["state", "enable", "disable", "browse", "detail"],
+        bisect_ready: true,
+        ported: vec!["state", "enable", "disable", "browse", "detail", "bisect"],
     })
 }
 
@@ -696,10 +696,356 @@ fn disable(folder: String) -> Result<Done, String> {
     move_folder(&mods, &off, &folder, "tắt")
 }
 
+fn installed_folders_rs(user: &Path) -> Result<Vec<(String, bool)>, String> {
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+    ensure_dirs(&mods, &off)?;
+
+    let on = dir_names(&mods);
+    let off_list = dir_names(&off);
+
+    let on_set: HashSet<_> = on.into_iter().collect();
+    let off_set: HashSet<_> = off_list.into_iter().collect();
+
+    let collisions: Vec<_> = on_set.intersection(&off_set).cloned().collect();
+    if !collisions.is_empty() {
+        return Err(format!(
+            "Xung đột tên mod: tồn tại đồng thời ở cả mods/ và mods_off/: {}",
+            collisions.join(", ")
+        ));
+    }
+
+    let mut res: Vec<(String, bool)> = Vec::new();
+    for f in &on_set {
+        res.push((f.clone(), true));
+    }
+    for f in &off_set {
+        res.push((f.clone(), false));
+    }
+    res.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    Ok(res)
+}
+
+fn bisect_state_internal(user: &Path) -> Result<Value, String> {
+    let state_file = user.join(".pzbisect.json");
+    let installed = installed_folders_rs(user)?;
+    let enabled_now: Vec<String> = installed
+        .iter()
+        .filter(|(_, en)| *en)
+        .map(|(f, _)| f.clone())
+        .collect();
+
+    if !state_file.is_file() {
+        return Ok(json!({
+            "round": 0,
+            "candidates": json!([]),
+            "enabled_now": enabled_now,
+            "suspect": Value::Null,
+            "done": false
+        }));
+    }
+
+    let text = fs::read_to_string(&state_file)
+        .map_err(|e| format!("Không đọc được file .pzbisect.json: {e}"))?;
+    let st: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("File .pzbisect.json chứa JSON không hợp lệ: {e}"))?;
+
+    Ok(json!({
+        "round": st.get("round").and_then(Value::as_u64).unwrap_or(0),
+        "candidates": st.get("candidates").cloned().unwrap_or(json!([])),
+        "enabled_now": enabled_now,
+        "suspect": st.get("suspect").cloned().unwrap_or(Value::Null),
+        "done": st.get("done").and_then(Value::as_bool).unwrap_or(false)
+    }))
+}
+
+fn bisect_view_internal(user: &Path) -> Result<Value, String> {
+    let st = bisect_state_internal(user)?;
+    let enabled_set: HashSet<String> = st["enabled_now"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    let cands: Vec<String> = st["candidates"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    let tested: Vec<String> = cands
+        .iter()
+        .filter(|c| enabled_set.contains(*c))
+        .cloned()
+        .collect();
+    let untested: Vec<String> = cands
+        .iter()
+        .filter(|c| !enabled_set.contains(*c))
+        .cloned()
+        .collect();
+    let done = st["done"].as_bool().unwrap_or(false);
+    let running = !cands.is_empty() && !done;
+
+    Ok(json!({
+        "ready": true,
+        "running": running,
+        "round": st["round"],
+        "candidates": cands,
+        "tested": tested,
+        "untested": untested,
+        "suspect": st["suspect"],
+        "enabled_now": st["enabled_now"],
+        "done": done
+    }))
+}
+
+fn bisect_start_internal(names: Option<Vec<String>>, user: &Path) -> Result<Value, String> {
+    let state_file = user.join(".pzbisect.json");
+    if state_file.is_file() {
+        if let Ok(text) = fs::read_to_string(&state_file) {
+            if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                if !val.get("done").and_then(Value::as_bool).unwrap_or(false) {
+                    return Err("Đang có phiên bisect hoạt động. Hãy chạy 'pzbisect stop' trước khi bắt đầu phiên mới.".into());
+                }
+            }
+        }
+    }
+
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+    ensure_dirs(&mods, &off)?;
+
+    let installed = installed_folders_rs(user)?;
+    let installed_map: HashMap<String, bool> = installed.into_iter().collect();
+    let mut original_enabled: Vec<String> = installed_map
+        .iter()
+        .filter(|(_, &en)| en)
+        .map(|(k, _)| k.clone())
+        .collect();
+    original_enabled.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+
+    let mut candidates: Vec<String> = match names {
+        None => original_enabled.clone(),
+        Some(list) => {
+            let mut cleaned = Vec::new();
+            for n in list {
+                let cn = check_folder(&n)?;
+                if !installed_map.contains_key(&cn) {
+                    return Err(format!("Mod '{cn}' không tồn tại trong danh sách cài đặt."));
+                }
+                cleaned.push(cn);
+            }
+            let set: HashSet<_> = cleaned.into_iter().collect();
+            set.into_iter().collect()
+        }
+    };
+
+    if candidates.len() < 2 {
+        return Err(format!(
+            "Bisect cần tối thiểu 2 candidates để bắt đầu (hiện có {}).",
+            candidates.len()
+        ));
+    }
+
+    candidates.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    let mid = (candidates.len() + 1) / 2;
+    let left = candidates[..mid].to_vec();
+    let right = candidates[mid..].to_vec();
+
+    for f in &left {
+        move_folder(&off, &mods, f, "bật")?;
+    }
+    for f in &right {
+        move_folder(&mods, &off, f, "tắt")?;
+    }
+
+    let st = json!({
+        "round": 1,
+        "candidates": candidates,
+        "current_tested": left,
+        "current_untested": right,
+        "original_enabled": original_enabled,
+        "suspect": Value::Null,
+        "done": false
+    });
+
+    let tmp = user.join(".pzbisect.json.tmp");
+    let json_text = serde_json::to_string_pretty(&st)
+        .map_err(|e| format!("Không serialize được JSON: {e}"))?;
+    fs::write(&tmp, json_text).map_err(|e| format!("Không ghi được file tạm: {e}"))?;
+    fs::rename(&tmp, &state_file).map_err(|e| format!("Không lưu được file trạng thái: {e}"))?;
+
+    bisect_view_internal(user)
+}
+
+fn bisect_mark_internal(bad: bool, user: &Path) -> Result<Value, String> {
+    let state_file = user.join(".pzbisect.json");
+    if !state_file.is_file() {
+        return Err("Không có phiên bisect nào đang hoạt động.".into());
+    }
+
+    let text = fs::read_to_string(&state_file)
+        .map_err(|e| format!("Không đọc được .pzbisect.json: {e}"))?;
+    let mut st: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("JSON không hợp lệ: {e}"))?;
+
+    if st.get("done").and_then(Value::as_bool).unwrap_or(false) {
+        return bisect_view_internal(user);
+    }
+
+    let current_tested: Vec<String> = st
+        .get("current_tested")
+        .and_then(Value::as_array)
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    let current_untested: Vec<String> = st
+        .get("current_untested")
+        .and_then(Value::as_array)
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    let mut new_candidates = if bad {
+        current_tested
+    } else {
+        current_untested
+    };
+
+    if new_candidates.is_empty() {
+        return Err("Lỗi logic bisect: danh sách candidates bị rỗng.".into());
+    }
+
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+
+    if new_candidates.len() == 1 {
+        let suspect = new_candidates.remove(0);
+        st["candidates"] = json!([suspect]);
+        st["current_tested"] = json!([]);
+        st["current_untested"] = json!([]);
+        st["suspect"] = json!(suspect);
+        st["done"] = json!(true);
+    } else {
+        let round = st.get("round").and_then(Value::as_u64).unwrap_or(1) + 1;
+        new_candidates.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        let mid = (new_candidates.len() + 1) / 2;
+        let left = new_candidates[..mid].to_vec();
+        let right = new_candidates[mid..].to_vec();
+
+        for f in &left {
+            move_folder(&off, &mods, f, "bật")?;
+        }
+        for f in &right {
+            move_folder(&mods, &off, f, "tắt")?;
+        }
+
+        st["round"] = json!(round);
+        st["candidates"] = json!(new_candidates);
+        st["current_tested"] = json!(left);
+        st["current_untested"] = json!(right);
+    }
+
+    let tmp = user.join(".pzbisect.json.tmp");
+    let json_text = serde_json::to_string_pretty(&st)
+        .map_err(|e| format!("Không serialize được JSON: {e}"))?;
+    fs::write(&tmp, json_text).map_err(|e| format!("Không ghi được file tạm: {e}"))?;
+    fs::rename(&tmp, &state_file).map_err(|e| format!("Không lưu được file trạng thái: {e}"))?;
+
+    bisect_view_internal(user)
+}
+
+fn bisect_stop_internal(user: &Path) -> Result<Value, String> {
+    let state_file = user.join(".pzbisect.json");
+    if !state_file.is_file() {
+        return Ok(json!({
+            "stopped": false,
+            "message": "Không có phiên bisect đang chạy",
+            "done": false
+        }));
+    }
+
+    let text = fs::read_to_string(&state_file)
+        .map_err(|e| format!("Không đọc được .pzbisect.json: {e}"))?;
+    let st: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("JSON không hợp lệ: {e}"))?;
+
+    let orig_arr = match st.get("original_enabled").and_then(Value::as_array) {
+        Some(arr) => arr,
+        None => {
+            return Err("File trạng thái .pzbisect.json bị hỏng (thiếu trường 'original_enabled'). Dừng khôi phục để tránh tắt nhầm mod. Hãy khôi phục thủ công.".into());
+        }
+    };
+
+    let orig_set: HashSet<String> = orig_arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    let mut snapshot_pool: HashSet<String> = orig_set.clone();
+    for key in &["candidates", "current_tested", "current_untested"] {
+        if let Some(arr) = st.get(key).and_then(Value::as_array) {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    snapshot_pool.insert(s.to_string());
+                }
+            }
+        }
+    }
+
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+    let installed = installed_folders_rs(user)?;
+
+    for (folder, is_enabled) in installed {
+        if orig_set.contains(&folder) && !is_enabled {
+            move_folder(&off, &mods, &folder, "bật")?;
+        } else if snapshot_pool.contains(&folder) && !orig_set.contains(&folder) && is_enabled {
+            move_folder(&mods, &off, &folder, "tắt")?;
+        }
+    }
+
+    fs::remove_file(&state_file).ok();
+    let restored: Vec<String> = orig_set.into_iter().collect();
+    Ok(json!({
+        "stopped": true,
+        "restored": restored,
+        "done": true
+    }))
+}
+
+#[tauri::command]
+fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value, String> {
+    let (_, user, _, _) = paths();
+    match op.as_deref().unwrap_or("view") {
+        "view" | "" => bisect_view_internal(&user),
+        "start" => {
+            let state = bisect_start_internal(names, &user)?;
+            Ok(json!({ "ok": true, "state": state }))
+        }
+        "bad" => {
+            let state = bisect_mark_internal(true, &user)?;
+            Ok(json!({ "ok": true, "state": state }))
+        }
+        "good" => {
+            let state = bisect_mark_internal(false, &user)?;
+            Ok(json!({ "ok": true, "state": state }))
+        }
+        "stop" => {
+            bisect_stop_internal(&user)?;
+            let state = bisect_view_internal(&user)?;
+            Ok(json!({ "ok": true, "state": state }))
+        }
+        other => Err(format!("Lệnh bisect không hợp lệ: {other}")),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            state, enable, disable, browse, detail
+            state, enable, disable, browse, detail, bisect
         ])
         .run(tauri::generate_context!())
         .expect("pzmod: tauri failed to start");
@@ -783,6 +1129,70 @@ mod tests {
         fs::create_dir_all(off.join("ModA")).unwrap();
         assert!(move_folder(&mods, &off, "ModA", "tắt").is_err());
         assert!(mods.join("ModA").is_dir() && off.join("ModA").is_dir());
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_bisect_start_refusal_when_active() {
+        let base = std::env::temp_dir().join(format!("pzmod-bisect-test1-{}", std::process::id()));
+        let mods = base.join("mods");
+        let off = base.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+        fs::create_dir_all(mods.join("ModA")).unwrap();
+        fs::create_dir_all(mods.join("ModB")).unwrap();
+
+        let st = bisect_start_internal(None, &base).unwrap();
+        assert_eq!(st["round"], 1);
+
+        // Calling start again while active must fail
+        assert!(bisect_start_internal(None, &base).is_err());
+
+        bisect_stop_internal(&base).unwrap();
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_bisect_stop_refusal_on_corrupted_state() {
+        let base = std::env::temp_dir().join(format!("pzmod-bisect-test2-{}", std::process::id()));
+        let mods = base.join("mods");
+        let off = base.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+        fs::create_dir_all(mods.join("ModA")).unwrap();
+        fs::create_dir_all(mods.join("ModB")).unwrap();
+
+        let state_file = base.join(".pzbisect.json");
+        fs::write(&state_file, r#"{"round": 1, "candidates": ["ModA", "ModB"]}"#).unwrap();
+
+        // Must refuse to stop and not touch filesystem
+        assert!(bisect_stop_internal(&base).is_err());
+        assert!(mods.join("ModA").is_dir() && mods.join("ModB").is_dir());
+
+        fs::remove_file(&state_file).ok();
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_bisect_stop_preserves_newly_installed_mod() {
+        let base = std::env::temp_dir().join(format!("pzmod-bisect-test3-{}", std::process::id()));
+        let mods = base.join("mods");
+        let off = base.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+        fs::create_dir_all(mods.join("ModA")).unwrap();
+        fs::create_dir_all(mods.join("ModB")).unwrap();
+        fs::create_dir_all(off.join("ModC")).unwrap();
+
+        bisect_start_internal(None, &base).unwrap();
+
+        // Install new mod mid-way
+        fs::create_dir_all(mods.join("NewMod")).unwrap();
+
+        bisect_stop_internal(&base).unwrap();
+
+        assert!(mods.join("ModA").is_dir());
+        assert!(mods.join("ModB").is_dir());
+        assert!(off.join("ModC").is_dir());
+        assert!(mods.join("NewMod").is_dir()); // Not disabled
 
         fs::remove_dir_all(&base).ok();
     }
