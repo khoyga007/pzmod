@@ -43,10 +43,13 @@ BROWSE = "https://steamcommunity.com/workshop/browse/?"
 UA = {"User-Agent": "Mozilla/5.0 (pzmod)"}
 
 SORTS = {"trend": "Thịnh hành tuần", "totaluniquesubscriptions": "Nhiều sub nhất",
-         "mostrecent": "Mới nhất", "textsearch": "Khớp từ khoá"}
+         "toprated": "Đánh giá cao nhất", "mostrecent": "Mới nhất",
+         "textsearch": "Khớp từ khoá"}
 
 # Steam bỏ qua browsesort nếu thiếu days: hỏi "nhiều sub nhất" mà không kèm cửa
 # sổ thời gian thì nó trả về đúng danh sách trending, nên bộ lọc trông như chết.
+# "toprated" cố tình không có mặt: Steam xếp theo sao và bỏ qua days, gửi kèm
+# chỉ tạo ra một nút bấm không làm gì.
 SORT_DAYS = {"trend": "7", "totaluniquesubscriptions": "3650"}
 
 # Cửa sổ thời gian, giống hộp chọn của Workshop. "Tất cả" là 3650 ngày chứ không

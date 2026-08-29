@@ -33,12 +33,14 @@ const RATE_LIMITED: &str =
 const SORTS: &[&str] = &[
     "trend",
     "totaluniquesubscriptions",
+    "toprated",
     "mostrecent",
     "textsearch",
 ];
 const SORT_LABELS: &[(&str, &str)] = &[
     ("trend", "Thịnh hành tuần"),
     ("totaluniquesubscriptions", "Nhiều sub nhất"),
+    ("toprated", "Đánh giá cao nhất"),
     ("mostrecent", "Mới nhất"),
     ("textsearch", "Khớp từ khoá"),
 ];
@@ -800,6 +802,8 @@ fn folder_status_at(mods: &Path, off: &Path, folder: &str) -> &'static str {
 /// ask for "most subscribed" with no `days` and it hands back the trending list,
 /// which is why every filter looked dead. `mostrecent` is the one sort that
 /// takes no window.
+/// `toprated` is deliberately absent: Steam ranks it by stars and ignores
+/// `days` entirely — the same list comes back for 7 as for 3650.
 fn sort_days(browse_sort: &str) -> Option<&'static str> {
     match browse_sort {
         "trend" => Some("7"),
@@ -1034,6 +1038,7 @@ struct Folder {
 struct SortLabels {
     trend: &'static str,
     totaluniquesubscriptions: &'static str,
+    toprated: &'static str,
     mostrecent: &'static str,
     textsearch: &'static str,
 }
@@ -1136,8 +1141,9 @@ fn state_internal(game: &Path, user: &Path) -> Result<State, String> {
         sorts: SortLabels {
             trend: SORT_LABELS[0].1,
             totaluniquesubscriptions: SORT_LABELS[1].1,
-            mostrecent: SORT_LABELS[2].1,
-            textsearch: SORT_LABELS[3].1,
+            toprated: SORT_LABELS[2].1,
+            mostrecent: SORT_LABELS[3].1,
+            textsearch: SORT_LABELS[4].1,
         },
         periods: PERIODS.iter().map(|(v, label)| [*v, *label]).collect(),
         tags: TAGS.iter().map(|tag| (*tag).to_string()).collect(),
