@@ -237,6 +237,9 @@ def bisect_start(names: Optional[List[str]] = None, user_dir: Optional[str] = No
         raise ValueError(f"Bisect cần tối thiểu 2 candidates để bắt đầu (hiện có {len(candidates)}).")
 
     candidates = sorted(candidates)
+    for f in candidates:
+        _check_folder_name(f)
+
     mid = (len(candidates) + 1) // 2
     left = candidates[:mid]
     right = candidates[mid:]
@@ -278,6 +281,9 @@ def bisect_mark(bad: bool, user_dir: Optional[str] = None) -> dict:
 
     if not new_candidates:
         raise RuntimeError("Lỗi logic bisect: danh sách candidates bị rỗng.")
+
+    for f in new_candidates:
+        _check_folder_name(f)
 
     if len(new_candidates) == 1:
         suspect = new_candidates[0]
@@ -334,6 +340,11 @@ def bisect_stop(user_dir: Optional[str] = None) -> dict:
         | set(st.get("current_tested", []))
         | set(st.get("current_untested", []))
     )
+
+    for f in orig:
+        _check_folder_name(f)
+    for f in snapshot_pool:
+        _check_folder_name(f)
 
     installed = installed_folders(user_dir)
 
@@ -516,7 +527,7 @@ def selftest() -> bool:
         print("  -> PASS")
 
         # 9. Test bisect_stop preserves newly installed mod during bisect session (Fix 3)
-        print("[9/9] Kiểm tra bisect_stop giữ nguyên mod cài mới giữa phiên bisect (Fix 3)...")
+        print("[9/10] Kiểm tra bisect_stop giữ nguyên mod cài mới giữa phiên bisect (Fix 3)...")
         # Mod_0..Mod_2 ON, Mod_3..Mod_6 OFF
         for m in mod_names[:3]:
             enable(m, user)
@@ -534,6 +545,33 @@ def selftest() -> bool:
         now_enabled = {f for f, en in installed_folders(user) if en}
         assert "NewMod_MidWay" in now_enabled
         assert set(mod_names[:3]).issubset(now_enabled)
+        print("  -> PASS")
+
+        # 10. Test hand-edited dirty name in state file fails cleanly without partial moves
+        print("[10/10] Kiểm tra state file bị sửa tay chứa tên bẩn không gây dời dở dang...")
+        for m in mod_names[:3]:
+            enable(m, user)
+        state_file = os.path.join(user, STATE_FILENAME)
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "round": 1,
+                "candidates": ["Mod_0", "../evil_traversal"],
+                "current_tested": ["Mod_0"],
+                "current_untested": ["../evil_traversal"],
+                "original_enabled": ["Mod_0", "Mod_1", "Mod_2"],
+                "suspect": None,
+                "done": False,
+            }, f)
+
+        # bisect_mark on dirty untested half must fail upfront without touching Mod_0
+        try:
+            bisect_mark(False, user_dir=user)
+            raise AssertionError("Lỗi: Không bắt được tên bẩn trong candidates")
+        except ValueError:
+            pass
+
+        assert os.path.isdir(os.path.join(mods_dir, "Mod_0")), "Mod_0 bị di chuyển sai khi gặp lỗi!"
+        os.remove(state_file)
         print("  -> PASS")
 
     print("=== TẤT CẢ TESTCASE ĐỀU PASS HOÀN TOÀN ===")

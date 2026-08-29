@@ -1743,6 +1743,10 @@ fn bisect_start_internal(names: Option<Vec<String>>, user: &Path) -> Result<Valu
         ));
     }
 
+    for f in &candidates {
+        check_folder(f)?;
+    }
+
     candidates.sort_by_key(|a| a.to_lowercase());
     let mid = candidates.len().div_ceil(2);
     let left = candidates[..mid].to_vec();
@@ -1812,6 +1816,10 @@ fn bisect_mark_internal(bad: bool, user: &Path) -> Result<Value, String> {
 
     if new_candidates.is_empty() {
         return Err("Lỗi logic bisect: danh sách candidates bị rỗng.".into());
+    }
+
+    for f in &new_candidates {
+        check_folder(f)?;
     }
 
     let mods = user.join("mods");
@@ -1888,6 +1896,13 @@ fn bisect_stop_internal(user: &Path) -> Result<Value, String> {
                 }
             }
         }
+    }
+
+    for f in &orig_set {
+        check_folder(f)?;
+    }
+    for f in &snapshot_pool {
+        check_folder(f)?;
     }
 
     let mods = user.join("mods");
@@ -2257,6 +2272,35 @@ mod tests {
         assert!(off.join("ModC").is_dir());
         assert!(mods.join("NewMod").is_dir()); // Not disabled
 
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_bisect_hand_edited_dirty_name_in_state_fails_cleanly_without_partial_move() {
+        let base = std::env::temp_dir().join(format!("pzmod-bisect-test4-{}", std::process::id()));
+        let mods = base.join("mods");
+        let off = base.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+        fs::create_dir_all(mods.join("ModA")).unwrap();
+        fs::create_dir_all(mods.join("ModB")).unwrap();
+
+        let state_file = base.join(".pzbisect.json");
+        let dirty_state = json!({
+            "round": 1,
+            "candidates": ["ModA", "../evil_traversal"],
+            "current_tested": ["ModA"],
+            "current_untested": ["../evil_traversal"],
+            "original_enabled": ["ModA", "ModB"],
+            "suspect": Value::Null,
+            "done": false
+        });
+        fs::write(&state_file, serde_json::to_string_pretty(&dirty_state).unwrap()).unwrap();
+
+        // Must fail upfront and not move ModA
+        assert!(bisect_mark_internal(false, &base).is_err());
+        assert!(mods.join("ModA").is_dir(), "ModA không được dời dở dang khi gặp tên bẩn");
+
+        fs::remove_file(&state_file).ok();
         fs::remove_dir_all(&base).ok();
     }
 }
