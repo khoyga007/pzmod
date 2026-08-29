@@ -849,23 +849,69 @@ function busy(on, text) {
 }
 
 /* ── log toast ────────────────────────────────────────────────── */
-function showLog(res) {
+function ensureLogBox() {
   let box = $("logBox");
   if (!box) {
     box = document.createElement("div");
     box.id = "logBox";
     box.className = "log";
     box.setAttribute("role", "status");
+    box.innerHTML = `<button class="btn btn--quiet log__close" onclick="this.parentNode.remove()" aria-label="Đóng">${ICON.cross}</button><div id="logLines"></div>`;
     document.body.appendChild(box);
   }
+  return box;
+}
+
+function logLineHTML(l) {
+  return `<div class="log__line${/^\s*(!|ERROR)/.test(l) ? " log__line--bad" : ""}">${esc(l)}</div>`;
+}
+
+function showLog(res) {
+  const box = ensureLogBox();
   // Backends differ: Python sends log as a list, a Rust command may send one
   // string. Normalise, or .map() below throws on a call that actually worked.
   const log = Array.isArray(res.log) ? res.log : res.log ? [res.log] : [];
   const lines = log.concat(res.error ? ["ERROR: " + res.error] : []);
-  box.innerHTML = `<button class="btn btn--quiet log__close" onclick="this.parentNode.remove()" aria-label="Đóng">${ICON.cross}</button>` +
-    lines.map((l) => `<div class="log__line${/^\s*(!|ERROR)/.test(l) ? " log__line--bad" : ""}">${esc(l)}</div>`).join("");
+  $("logLines").innerHTML = lines.map(logLineHTML).join("");
   $("statNote").textContent = lines.length ? lines[lines.length - 1] : "";
   if (res.ok) setTimeout(() => { if (box.isConnected) box.remove(); }, 6000);
+}
+
+/* ── tiến trình sống (P6) — poll GET /api/progress?since=N ────── */
+const progress = { timer: null, seq: 0 };
+
+function appendProgressLines(lines) {
+  if (!lines.length) return;
+  const box = ensureLogBox();
+  $("logLines").insertAdjacentHTML("beforeend", lines.map(logLineHTML).join(""));
+}
+
+async function pollProgress() {
+  progress.timer = null;
+  let data;
+  try {
+    data = await api("/api/progress?since=" + progress.seq);
+  } catch (e) {
+    return;   // route thiếu/backend cũ -> im lặng dừng, không báo lỗi
+  }
+  const seq = Number(data.seq) || progress.seq;
+  const lines = Array.isArray(data.lines) ? data.lines : [];
+  if (seq > progress.seq && lines.length) {
+    progress.seq = seq;
+    appendProgressLines(lines);
+    if ($("busy").dataset.on === "1") busy(true, lines[lines.length - 1]);
+  }
+  if (data.active) progress.timer = setTimeout(pollProgress, 400);
+}
+
+function startProgress() {
+  if (progress.timer) return;   // đã có poller sống, không mở thêm
+  progress.timer = setTimeout(pollProgress, 400);
+}
+
+function stopProgress() {
+  clearTimeout(progress.timer);
+  progress.timer = null;
 }
 
 /* ── workshop grid ────────────────────────────────────────────── */
@@ -1064,6 +1110,20 @@ function jumpToWorkshop(text) {
   load(true);
 }
 
+// P4: workshop id đã resolve cho một modid (nếu có), từ state.installed[*].resolved.
+function resolvedWorkshopId(modid) {
+  const key = String(modid || "").toLowerCase();
+  if (!key) return null;
+  for (const e of Object.values(state.installed)) {
+    const r = e && e.resolved ? e.resolved : {};
+    if (typeof r[modid] === "string" && r[modid]) return r[modid];
+    for (const k in r) {
+      if (k.toLowerCase() === key && typeof r[k] === "string" && r[k]) return r[k];
+    }
+  }
+  return null;
+}
+
 function renderHave() {
   const list = Object.entries(state.installed).sort((a, b) => a[1].title.localeCompare(b[1].title));
   $("haveCount").textContent = list.length || "";
@@ -1080,12 +1140,18 @@ function renderHave() {
     $("missText").appendChild(document.createTextNode("Thiếu mod bắt buộc: "));
     miss.forEach((m, i) => {
       if (i) $("missText").appendChild(document.createTextNode(", "));
+      const wid = resolvedWorkshopId(m);
       const b = document.createElement("button");
       b.className = "chip";
       b.type = "button";
       b.textContent = m;
-      b.title = "Tìm '" + m + "' trên Workshop";
-      b.addEventListener("click", () => jumpToWorkshop(m));
+      if (wid) {
+        b.title = "Đã tìm thấy " + wid + " — mở trang cài";
+        b.addEventListener("click", () => openSheet(wid));
+      } else {
+        b.title = "Tìm '" + m + "' trên Workshop";
+        b.addEventListener("click", () => jumpToWorkshop(m));
+      }
       $("missText").appendChild(b);
     });
     $("missText").appendChild(document.createTextNode(" — bấm để tìm rồi cài thêm."));
@@ -1255,6 +1321,7 @@ async function bulkInstall() {
   bar.forEach((b) => { b.disabled = true; });
   const log = [];
   let done = 0, failed = 0;
+  startProgress();
   for (const id of jobs) {
     // Một mod trước đó có thể đã kéo theo mod này như phụ thuộc — bỏ qua,
     // cài lại chỉ tốn thêm một lượt steamcmd.
@@ -1280,6 +1347,7 @@ async function bulkInstall() {
     await refreshState();
     refreshCards();
   }
+  stopProgress();
   busy(false);
   log.push(`--- xong ${jobs.length - failed}/${jobs.length}` + (failed ? `, hỏng ${failed} (vẫn còn đánh dấu)` : ""));
   showLog({ ok: failed === 0, log });
@@ -1292,14 +1360,17 @@ async function act(kind, id, btn) {
   const label = btn ? btn.innerHTML : "";
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>'; }
   busy(true, kind === "remove" ? "đang gỡ" : "đang tải về");
+  startProgress();
   try {
     const res = kind === "remove"
       ? await api("/api/remove", { id })
       : await api("/api/install", { id, force: kind === "update" });
+    stopProgress();
     showLog(res);
     await refreshState();
     refreshCards();
   } catch (e) {
+    stopProgress();
     showLog({ ok: false, error: e.message });
   } finally {
     busy(false);
@@ -1359,10 +1430,14 @@ $("more").addEventListener("click", () => load(false));
 $("updateAll").addEventListener("click", async (ev) => {
   ev.currentTarget.disabled = true;
   busy(true, "đang cập nhật tất cả");
+  startProgress();
   try {
-    showLog(await api("/api/update", {}));
+    const res = await api("/api/update", {});
+    stopProgress();
+    showLog(res);
     await refreshState();
   } catch (e) {
+    stopProgress();
     showLog({ ok: false, error: e.message });
   } finally {
     busy(false);
