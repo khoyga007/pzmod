@@ -17,6 +17,7 @@
 html, body { overflow-x: clip; }
 
 html {
+  color-scheme: dark;
   background: var(--color-paper);
   color: var(--color-ink);
   font-family: var(--font-body);
@@ -24,6 +25,35 @@ html {
   font-weight: var(--weight-body);
   line-height: var(--lh-body);
   -webkit-font-smoothing: antialiased;
+}
+
+/* ── Custom Nightshift scrollbars ────────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-rule) var(--color-paper);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-paper);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-rule);
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--color-paper);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-rule-strong);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--color-paper);
 }
 
 body {
