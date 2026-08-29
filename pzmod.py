@@ -49,6 +49,11 @@ SORTS = {"trend": "Thịnh hành tuần", "totaluniquesubscriptions": "Nhiều s
 # sổ thời gian thì nó trả về đúng danh sách trending, nên bộ lọc trông như chết.
 SORT_DAYS = {"trend": "7", "totaluniquesubscriptions": "3650"}
 
+# Cửa sổ thời gian, giống hộp chọn của Workshop. "Tất cả" là 3650 ngày chứ không
+# phải -1: Steam đọc -1 ra thành một ngày, trả về mod mới toanh vài chục sub.
+PERIODS = [("7", "1 tuần"), ("30", "1 tháng"), ("90", "3 tháng"),
+           ("180", "6 tháng"), ("365", "1 năm"), ("3650", "Tất cả")]
+
 TAGS = ["Build 40", "Build 41", "Build 42", "Animals", "Audio", "Balance",
         "Building", "Clothing/Armor", "Farming", "Food", "Framework", "Hardmode",
         "Interface", "Items", "Language/Translation", "Literature", "Map", "Military",
@@ -567,7 +572,7 @@ def requires(wid):
     return out[:20]
 
 
-def browse(query="", sort="trend", page=1, tags=()):
+def browse(query="", sort="trend", page=1, tags=(), days=None):
     """Scrape workshop listing ids; the keyless details API supplies metadata."""
     wid = maybe_id(query)
     if wid:
@@ -578,7 +583,8 @@ def browse(query="", sort="trend", page=1, tags=()):
     if query:
         fields.append(("searchtext", query))
     if browse_sort in SORT_DAYS:
-        fields.append(("days", SORT_DAYS[browse_sort]))
+        window = days if days in dict(PERIODS) else SORT_DAYS[browse_sort]
+        fields.append(("days", window))
     fields.extend(("requiredtags[]", tag) for tag in tags)
     html = cached_page(BROWSE + urllib.parse.urlencode(fields))
     ids, seen = [], set()

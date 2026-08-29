@@ -285,6 +285,7 @@ h1, h2, h3 {
   cursor: pointer;
   transition: background-color var(--dur-micro) var(--ease-out);
 }
+.seg[hidden] { display: none; }   /* display:flex above would beat plain [hidden] */
 .seg button:first-child { border-inline-start: 0; }
 .seg button:hover { background: var(--color-paper-3); color: var(--color-ink); }
 .seg button:active { background: var(--color-paper-4); }
@@ -742,6 +743,7 @@ h1, h2, h3 {
           <kbd>Ctrl K</kbd>
         </label>
         <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
+        <div class="seg" id="daySeg" role="group" aria-label="Khoảng thời gian" hidden></div>
         <button class="btn btn--tall" id="pickPage">Chọn cả trang</button>
       </div>
 
@@ -818,7 +820,7 @@ h1, h2, h3 {
 
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { installed: {}, sorts: {}, tags: [], sort: "trend", tag: "", q: "", page: 1, busy: false,
+const state = { installed: {}, sorts: {}, periods: [], tags: [], sort: "trend", tag: "", days: "", q: "", page: 1, busy: false,
   loose: [], missing: [],
   picked: new Map(),   // id -> {title,size}, sống qua mọi lần đổi tag/trang
   seen: new Map() };   // id -> item, để hàng đợi biết tên và dung lượng
@@ -898,6 +900,27 @@ function cardHTML(it) {
 // client too — so a listing already fetched this session is never fetched again.
 const pageCache = new Map();
 
+// "Mới nhất" is already chronological and a search is ranked by relevance, so
+// Steam ignores the window on both — the picker hides rather than lying.
+function hasWindow() {
+  return !state.q && (state.sort === "trend" || state.sort === "totaluniquesubscriptions");
+}
+
+// Backend defaults: trending reads the last week, most-subscribed reads all of
+// time. Mirror them here so a button is always lit and the two never disagree.
+function defaultDays() {
+  return state.sort === "totaluniquesubscriptions" ? "3650" : "7";
+}
+
+function syncDaySeg() {
+  const seg = $("daySeg");
+  seg.hidden = !hasWindow();
+  if (seg.hidden) return;
+  const want = state.days || defaultDays();
+  state.days = want;
+  seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.days === want)));
+}
+
 async function load(reset) {
   if (state.busy) return;
   state.busy = true;
@@ -907,6 +930,7 @@ async function load(reset) {
   try {
     const p = new URLSearchParams({ sort: state.sort, page: state.page, q: state.q });
     if (state.tag) p.append("tag", state.tag);
+    if (state.days && hasWindow()) p.append("days", state.days);
     const key = p.toString();
     if (!pageCache.has(key)) pageCache.set(key, (await api("/api/browse?" + p)).items);
     const items = pageCache.get(key);
@@ -1065,7 +1089,7 @@ async function bisectDo(op, btn) {
 /* ── state ────────────────────────────────────────────────────── */
 async function refreshState() {
   const s = await api("/api/state");
-  Object.assign(state, { installed: s.installed, sorts: s.sorts, tags: s.tags });
+  Object.assign(state, { installed: s.installed, sorts: s.sorts, periods: s.periods || [], tags: s.tags });
   state.loose = s.loose || [];
   state.missing = s.missing || [];
 
@@ -1269,6 +1293,7 @@ $("updateAll").addEventListener("click", async (ev) => {
 let typing;
 $("q").addEventListener("input", (ev) => {
   state.q = ev.target.value.trim();
+  syncDaySeg();          // a search is ranked by relevance — no window applies
   clearTimeout(typing);
   typing = setTimeout(() => load(true), 700);
 });
@@ -1311,8 +1336,20 @@ document.addEventListener("keydown", (ev) => {
     if (!b) return;
     state.sort = b.dataset.sort;
     $("sortSeg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    syncDaySeg();
     load(true);
   });
+
+  $("daySeg").innerHTML = state.periods
+    .map(([v, label]) => `<button data-days="${esc(v)}" aria-pressed="${v === state.days}">${esc(label)}</button>`).join("");
+  $("daySeg").addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-days]");
+    if (!b) return;
+    state.days = b.dataset.days;
+    $("daySeg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    load(true);
+  });
+  syncDaySeg();
 
   $("chips").innerHTML = [["", "Tất cả"]].concat(state.tags.map((t) => [t, t]))
     .map(([v, label], i) => `<button class="chip" data-tag="${esc(v)}" aria-pressed="${i === 0}">${esc(label)}</button>`).join("");

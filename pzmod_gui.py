@@ -82,7 +82,7 @@ def snapshot():
         loose = [{"name": n, "enabled": on} for n, on in module.installed_folders()
                  if n not in known]
     return {"game": pzmod.GAME, "mods": pzmod.MODS, "off": pzmod.OFF,
-            "sorts": pzmod.SORTS, "tags": pzmod.TAGS,
+            "sorts": pzmod.SORTS, "tags": pzmod.TAGS, "periods": pzmod.PERIODS,
             "installed": installed,
             "loose": loose,
             "missing": pzmod.missing_requirements(state),
@@ -144,8 +144,8 @@ def card(d):
             "summary": pzmod.strip_bb(d.get("description")).replace("\r", "").strip()[:220]}
 
 
-def listing(q, sort, page, tags):
-    ids = pzmod.browse(q, sort, page, tags)
+def listing(q, sort, page, tags, days=None):
+    ids = pzmod.browse(q, sort, page, tags, days)
     meta = pzmod.details(ids)
     # Steam pins its own "Modding Policy" notice to the top of every listing,
     # tag filter or not. Drop anything that lacks the tags that were asked for.
@@ -257,8 +257,9 @@ class Handler(BaseHTTPRequestHandler):
                 if sort not in pzmod.SORTS:
                     sort = "trend"
                 tags = [t for t in qs.get("tag", []) if t in pzmod.TAGS]
+                days = one("days") or None
                 try:
-                    items = listing(one("q"), sort, page, tags)
+                    items = listing(one("q"), sort, page, tags, days)
                 except pzmod.Blocked as e:
                     return self.send({"error": str(e)}, code=503)
                 return self.send({"items": items, "page": page})

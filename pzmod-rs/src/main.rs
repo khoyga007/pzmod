@@ -808,6 +808,18 @@ fn sort_days(browse_sort: &str) -> Option<&'static str> {
     }
 }
 
+/// The window picker, same choices the Workshop offers. "Tất cả" is 3650 days,
+/// not -1: Steam reads -1 as a single day and answers with brand-new mods that
+/// have a few dozen subscribers.
+const PERIODS: &[(&str, &str)] = &[
+    ("7", "1 tuần"),
+    ("30", "1 tháng"),
+    ("90", "3 tháng"),
+    ("180", "6 tháng"),
+    ("365", "1 năm"),
+    ("3650", "Tất cả"),
+];
+
 /// Steam pins its own "Modding Policy" notice to the top of every listing, tag
 /// filter or not, so the tags are checked again against the metadata.
 fn has_tags(item: &Value, wanted: &[String]) -> bool {
@@ -825,7 +837,13 @@ fn has_tags(item: &Value, wanted: &[String]) -> bool {
 }
 
 #[tauri::command]
-fn browse(q: String, sort: String, page: u32, tags: Vec<String>) -> Result<Value, String> {
+fn browse(
+    q: String,
+    sort: String,
+    page: u32,
+    tags: Vec<String>,
+    days: Option<String>,
+) -> Result<Value, String> {
     let page = page.clamp(1, 50);
     let wanted: Vec<String> = tags
         .iter()
@@ -854,8 +872,12 @@ fn browse(q: String, sort: String, page: u32, tags: Vec<String>) -> Result<Value
         if !q.is_empty() {
             fields.push(("searchtext".into(), q));
         }
-        if let Some(days) = sort_days(browse_sort) {
-            fields.push(("days".into(), days.into()));
+        if let Some(fallback) = sort_days(browse_sort) {
+            let window = days
+                .as_deref()
+                .filter(|asked| PERIODS.iter().any(|(value, _)| value == asked))
+                .unwrap_or(fallback);
+            fields.push(("days".into(), window.into()));
         }
         fields.extend(
             wanted
@@ -1027,6 +1049,9 @@ struct State {
     loose: Vec<Folder>,
     missing: Vec<String>,
     sorts: SortLabels,
+    /// [value, label] pairs for the time-window picker; the UI renders them in
+    /// order, so a plain array keeps that order.
+    periods: Vec<[&'static str; 2]>,
     tags: Vec<String>,
     bisect_ready: bool,
     /// Routes still served by pzmod.py; the UI greys those tabs out.
@@ -1114,6 +1139,7 @@ fn state_internal(game: &Path, user: &Path) -> Result<State, String> {
             mostrecent: SORT_LABELS[2].1,
             textsearch: SORT_LABELS[3].1,
         },
+        periods: PERIODS.iter().map(|(v, label)| [*v, *label]).collect(),
         tags: TAGS.iter().map(|tag| (*tag).to_string()).collect(),
         bisect_ready: true,
         ported: vec![
@@ -2141,6 +2167,9 @@ mod tests {
         assert_eq!(sort_days("trend"), Some("7"));
         assert_eq!(sort_days("totaluniquesubscriptions"), Some("3650"));
         assert_eq!(sort_days("mostrecent"), None);
+        // the picker offers exactly the windows Steam ranks over
+        let values: Vec<&str> = PERIODS.iter().map(|(value, _)| *value).collect();
+        assert_eq!(values, ["7", "30", "90", "180", "365", "3650"]);
     }
 
     #[test]
@@ -2187,7 +2216,7 @@ mod tests {
     #[test]
     #[ignore = "live Steam API/community check"]
     fn live_workshop_commands_match_ui_shape() {
-        let listing = browse("498441420".into(), "trend".into(), 1, Vec::new()).unwrap();
+        let listing = browse("498441420".into(), "trend".into(), 1, Vec::new(), None).unwrap();
         let item = &listing["items"][0];
         assert_eq!(item["id"], "498441420");
         assert!(item["preview"].as_str().unwrap().starts_with("https://"));
