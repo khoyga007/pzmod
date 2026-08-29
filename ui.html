@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ddmod — trình quản lý mod Darkest Dungeon</title>
+<title>pzmod — trình quản lý mod Project Zomboid</title>
 <link rel="stylesheet" href="/tokens.css">
 <style>
-/* Hallmark · macrostructure: Gallery-First · theme: Midnight (shared with fmod/dspmod)
+/* Hallmark · macrostructure: Gallery-First · theme: Midnight (shared with fmod/dspmod/ddmod)
  * nav: N13 bar, search pill demoted right of the sort control — the grid is the entry
  * point, typing is optional. footer: Ft4 dense colophon.
  */
@@ -164,6 +164,8 @@ body {
   padding: var(--space-sm) clamp(1rem, 3vw, 1.75rem);
   border-bottom: var(--rule-hair) solid var(--color-rule-soft);
 }
+
+.chips[hidden] { display: none; }
 
 .chip {
   padding: var(--space-3xs) var(--space-xs);
@@ -331,7 +333,7 @@ body:has(.bulk:not([hidden])) main { padding-bottom: 6rem; }
 
 .row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
   align-items: center;
   gap: var(--space-md);
   padding: var(--space-xs) var(--space-sm);
@@ -343,6 +345,41 @@ body:has(.bulk:not([hidden])) main { padding-bottom: 6rem; }
 .row__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
 .row__dim { color: var(--color-faint); font-family: var(--font-display); font-size: var(--text-xs); }
 .row__warn { color: var(--color-danger); font-family: var(--font-display); font-size: var(--text-xs); }
+
+.warnbar {
+  margin: 0 0 var(--space-md);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-hair) solid var(--color-danger-dim);
+  border-radius: var(--radius-sm);
+  color: var(--color-danger);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+}
+
+.sub { margin: var(--space-xl) 0 var(--space-sm); font-size: var(--text-sm); font-weight: var(--weight-mid); color: var(--color-neutral); }
+
+.panel {
+  max-width: 46rem;
+  padding: var(--space-md);
+  background: var(--color-paper-2);
+  border: var(--rule-hair) solid var(--color-rule-soft);
+  border-radius: var(--radius-md);
+}
+
+.panel__title { margin: 0 0 var(--space-2xs); font-size: var(--text-lg); font-weight: var(--weight-bold); }
+.panel__note { margin: 0 0 var(--space-md); color: var(--color-muted); font-size: var(--text-sm); }
+.panel__row { display: flex; flex-wrap: wrap; gap: var(--space-xs); margin-top: var(--space-md); }
+.panel__stat { margin: 0 0 var(--space-xs); font-family: var(--font-display); font-size: var(--text-xs); color: var(--color-faint); }
+.panel__hit { padding: var(--space-sm); border: var(--rule-hair) solid var(--color-accent); border-radius: var(--radius-sm); font-size: var(--text-base); }
+
+.split { display: grid; gap: var(--space-md); grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
+.split h3 { margin: 0 0 var(--space-2xs); font-family: var(--font-display); font-size: var(--text-2xs); letter-spacing: 0.04em; color: var(--color-faint); }
+.split ul { margin: 0; padding-left: var(--space-md); font-size: var(--text-sm); color: var(--color-muted); }
+
+.pill { padding: var(--space-3xs) var(--space-2xs); border-radius: var(--radius-pill); font-family: var(--font-display); font-size: var(--text-2xs); }
+.pill--on { color: var(--color-accent); border: var(--rule-hair) solid var(--color-accent-dim); }
+.pill--off { color: var(--color-faint); border: var(--rule-hair) solid var(--color-rule); }
+.pill--bad { color: var(--color-danger); border: var(--rule-hair) solid var(--color-danger-dim); }
 
 /* ─── dialog ─────────────────────────────────────────────────────── */
 
@@ -412,7 +449,7 @@ footer {
 <body>
 
 <header class="bar">
-  <div class="brand"><span class="brand__mark"></span>ddmod<span class="brand__sub" id="brandSub"></span></div>
+  <div class="brand"><span class="brand__mark"></span>pzmod<span class="brand__sub" id="brandSub"></span></div>
 
   <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
 
@@ -426,6 +463,7 @@ footer {
 
   <button class="btn" id="tabBrowse" aria-pressed="true">Workshop</button>
   <button class="btn" id="tabHave" aria-pressed="false">Đã cài <span id="haveCount" class="u-nums"></span></button>
+  <button class="btn" id="tabBisect" aria-pressed="false">Dò mod lỗi</button>
 </header>
 
 <div class="chips" id="chips"></div>
@@ -441,8 +479,22 @@ footer {
     <div style="display:flex;gap:var(--space-xs);margin-bottom:var(--space-md)">
       <button class="btn btn--accent" id="updateAll">Cập nhật hết</button>
     </div>
+    <p class="warnbar" id="missBar" hidden></p>
     <div class="rows" id="rows"></div>
-    <p class="empty" id="haveEmpty" hidden>Chưa cài mod nào qua ddmod.</p>
+    <p class="empty" id="haveEmpty" hidden>Chưa cài mod nào qua pzmod.</p>
+    <h2 class="sub" id="looseHead" hidden>Mod tự bỏ vào tay</h2>
+    <div class="rows" id="looseRows"></div>
+  </section>
+
+  <section id="viewBisect" hidden>
+    <div class="panel">
+      <h2 class="panel__title">Dò mod gây lỗi</h2>
+      <p class="panel__note">Chia đôi số mod đang bật, mỗi vòng chỉ bật một nửa. Vòng nào cũng vậy:
+        bấm nút bên dưới → mở game thử → quay lại trả lời <b>Vẫn lỗi</b> hay <b>Hết lỗi</b>.
+        Mỗi lần trả lời cắt một nửa, khoảng log2(n) vòng là ra thủ phạm.
+        <b>Dừng</b> trả mọi mod về đúng trạng thái bật/tắt ban đầu.</p>
+      <div id="bisectBody"></div>
+    </div>
   </section>
 </main>
 
@@ -582,24 +634,118 @@ function refreshCards() {
   renderBulk();   // quét trên có thể đã bỏ tick mấy mod vừa cài kèm
 }
 
+const STATUS = {
+  enabled: `<span class="pill pill--on">đang bật</span>`,
+  disabled: `<span class="pill pill--off">đã tắt</span>`,
+  missing: `<span class="pill pill--bad">thiếu thư mục</span>`,
+  collision: `<span class="pill pill--bad">trùng ở cả 2 nơi</span>`,
+  invalid: `<span class="pill pill--bad">tên hỏng</span>`,
+};
+
+// Bật/tắt tác động lên THƯ MỤC mod, nên mỗi thư mục một dòng — một item workshop
+// có thể đẻ ra vài thư mục, và mod Yang tự chép tay cũng phải bật tắt được.
+function folderRow(f, id, title, size) {
+  const toggle = f.status === "enabled"
+    ? `<button class="btn" data-act="disable" data-folder="${esc(f.name)}">Tắt</button>`
+    : f.status === "disabled"
+      ? `<button class="btn" data-act="enable" data-folder="${esc(f.name)}">Bật</button>`
+      : `<button class="btn" disabled>—</button>`;
+  const own = id
+    ? `<button class="btn" data-act="open" data-id="${id}">Xem</button>
+       <button class="btn btn--danger" data-act="remove" data-id="${id}">Gỡ</button>`
+    : `<span class="row__dim">ngoài pzmod</span>`;
+  return `<div class="row">
+    <div class="row__name" title="${esc(f.name)}">${esc(title)}<span class="row__dim"> · ${esc(f.name)}</span></div>
+    <div class="row__dim u-nums">${size ? KB(size) : ""}</div>
+    <div>${STATUS[f.status] || esc(f.status)}</div>
+    ${toggle}
+    ${own}
+  </div>`;
+}
+
 function renderHave() {
   const list = Object.entries(state.installed).sort((a, b) => a[1].title.localeCompare(b[1].title));
   $("haveCount").textContent = list.length ? `(${list.length})` : "";
   $("haveEmpty").hidden = list.length > 0;
-  $("rows").innerHTML = list.map(([id, e]) => `<div class="row">
-    <div class="row__name" title="${esc(e.folder)}">${esc(e.title)}</div>
-    <div class="${e.present ? "row__dim" : "row__warn"}">${e.present ? KB(e.size || 0) : "thiếu thư mục"}</div>
-    <button class="btn" data-act="open" data-id="${id}">Xem</button>
-    <button class="btn btn--danger" data-act="remove" data-id="${id}">Gỡ</button>
-  </div>`).join("");
+  $("rows").innerHTML = list.map(([id, e]) => {
+    const folders = e.folders && e.folders.length ? e.folders : [{ name: "(không rõ)", status: "missing" }];
+    return folders.map((f) => folderRow(f, id, e.title, e.size)).join("");
+  }).join("");
+
+  const miss = state.missing || [];
+  $("missBar").hidden = miss.length === 0;
+  $("missBar").textContent = miss.length
+    ? `Thiếu mod bắt buộc: ${miss.join(", ")} — mod cần chúng sẽ không chạy. Tìm trên Workshop rồi cài thêm.`
+    : "";
+
+  const loose = state.loose || [];
+  $("looseHead").hidden = loose.length === 0;
+  $("looseRows").innerHTML = loose
+    .map((f) => folderRow({ name: f.name, status: f.enabled ? "enabled" : "disabled" }, "", f.name, 0)).join("");
+}
+
+/* ── dò mod lỗi ───────────────────────────────────────────────── */
+function bisectHTML(b) {
+  if (!b.ready) return `<p class="row__warn">${esc(b.error || "không dùng được")}</p>`;
+  if (b.suspect) {
+    return `<p class="panel__hit">Thủ phạm: <b>${esc(b.suspect)}</b></p>
+      <p class="panel__stat">Gỡ hoặc cứ để tắt mod này. Bấm Dừng để trả các mod khác về như cũ.</p>
+      <div class="panel__row"><button class="btn btn--accent" data-bis="stop">Dừng &amp; khôi phục</button></div>`;
+  }
+  if (!b.running) {
+    const n = (b.enabled_now || []).length;
+    return `<p class="panel__stat">${n} mod đang bật. Bisect chỉ đụng vào số mod này; mod đang tắt sẵn để nguyên.</p>
+      <div class="panel__row"><button class="btn btn--accent" data-bis="start" ${n < 2 ? "disabled" : ""}>Bắt đầu dò</button></div>
+      ${n < 2 ? `<p class="panel__stat">Cần ít nhất 2 mod đang bật.</p>` : ""}`;
+  }
+  const li = (xs) => xs.length
+    ? `<ul>${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
+    : `<p class="panel__stat">(trống)</p>`;
+  return `<p class="panel__stat">Vòng ${b.round} · còn ${b.candidates.length} mod nghi ngờ</p>
+    <div class="split">
+      <div><h3>ĐANG BẬT — vòng này thử</h3>${li(b.tested)}</div>
+      <div><h3>ĐANG TẮT</h3>${li(b.untested)}</div>
+    </div>
+    <p class="panel__stat" style="margin-top:var(--space-md)">Mở game, làm lại đúng thao tác gây lỗi, rồi trả lời:</p>
+    <div class="panel__row">
+      <button class="btn btn--danger" data-bis="bad">Vẫn lỗi</button>
+      <button class="btn btn--accent" data-bis="good">Hết lỗi</button>
+      <button class="btn" data-bis="stop">Dừng &amp; khôi phục</button>
+    </div>`;
+}
+
+async function loadBisect() {
+  try {
+    $("bisectBody").innerHTML = bisectHTML(await api("/api/bisect"));
+  } catch (e) {
+    $("bisectBody").innerHTML = `<p class="row__warn">${esc(e.message)}</p>`;
+  }
+}
+
+async function bisectDo(op, btn) {
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spin"></span>`;
+  try {
+    const res = await api("/api/bisect", { op });
+    if (res.error) showLog({ ok: false, error: res.error });
+    $("bisectBody").innerHTML = bisectHTML(res.state || (await api("/api/bisect")));
+    await refreshState();
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+    btn.disabled = false;
+    btn.innerHTML = label;
+  }
 }
 
 async function refreshState() {
   const s = await api("/api/state");
   Object.assign(state, { installed: s.installed, sorts: s.sorts, tags: s.tags });
-  $("brandSub").textContent = "· Darkest Dungeon";
-  $("foot").textContent = `game ${s.game}   ·   mods ${s.mods}   ·   ${Object.keys(s.installed).length} mod do ddmod quản lý`
-    + "\nbật/tắt mod vẫn làm trong màn hình Mods của game";
+  state.loose = s.loose || [];
+  state.missing = s.missing || [];
+  $("brandSub").textContent = "· Project Zomboid";
+  $("foot").textContent = `game ${s.game}   ·   mods ${s.mods}   ·   tắt vào ${s.off}   ·   ${Object.keys(s.installed).length} mod do pzmod quản lý`
+    + "\nBật/Tắt ở đây = dời thư mục giữa mods và mods_off; trong game vẫn phải tick mod ở màn hình Mods.";
   renderHave();
 }
 
@@ -621,7 +767,14 @@ async function openSheet(id) {
   if (d.children) bits.unshift(`COLLECTION — ${d.children} mod con`);
   if (d.folder) bits.unshift("đã cài: mods\\" + d.folder);
   $("sheetMeta").textContent = bits.filter(Boolean).join("   ·   ");
-  $("sheetDesc").textContent = d.description || "(không có mô tả)";
+  if (d.modids && d.modids.length) bits.push("mod id: " + d.modids.join(", "));
+  $("sheetMeta").textContent = bits.filter(Boolean).join("   ·   ");
+  const req = (d.required || []).map((r) =>
+    `${r.installed ? "\u2713" : "\u2717"} ${r.title}${r.installed ? "" : " (chưa cài)"}`);
+  const reqLine = d.req_blocked
+    ? "Mod bắt buộc: không đọc được trang workshop lúc này."
+    : (req.length ? "Mod bắt buộc:\n  " + req.join("\n  ") : "");
+  $("sheetDesc").textContent = (reqLine ? reqLine + "\n\n" : "") + (d.description || "(không có mô tả)");
   const btn = $("sheetInstall");
   btn.textContent = state.installed[id] ? "Cài lại" : (d.children ? `Cài cả ${d.children} mod` : "Cài");
   btn.dataset.id = id;
@@ -719,13 +872,29 @@ async function act(kind, id, btn) {
 }
 
 document.addEventListener("click", (ev) => {
+  const bis = ev.target.closest("[data-bis]");
+  if (bis) return bisectDo(bis.dataset.bis, bis);
   const el = ev.target.closest("[data-act]");
   if (!el) return;
-  const { act: kind, id } = el.dataset;
+  const { act: kind, id, folder } = el.dataset;
   if (kind === "open") return openSheet(id);
   if (kind === "pick") return togglePick(id, el);
+  if (kind === "enable" || kind === "disable") return toggleFolder(kind, folder, el);
   act(kind, id, el);
 });
+
+async function toggleFolder(kind, folder, btn) {
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spin"></span>`;
+  try {
+    showLog(await api("/api/" + kind, { folder }));
+    await refreshState();
+    renderHave();
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+    btn.disabled = false;
+  }
+}
 
 $("sheetInstall").addEventListener("click", (ev) => {
   const id = ev.currentTarget.dataset.id;
@@ -750,15 +919,18 @@ $("q").addEventListener("input", (ev) => {
   typing = setTimeout(() => load(true), 700);
 });
 
-function setTab(browse) {
-  $("viewBrowse").hidden = !browse;
-  $("viewHave").hidden = browse;
-  $("chips").hidden = !browse;
-  $("tabBrowse").setAttribute("aria-pressed", String(browse));
-  $("tabHave").setAttribute("aria-pressed", String(!browse));
+function setTab(which) {
+  $("viewBrowse").hidden = which !== "browse";
+  $("viewHave").hidden = which !== "have";
+  $("viewBisect").hidden = which !== "bisect";
+  $("chips").hidden = which !== "browse";
+  $("tabBrowse").setAttribute("aria-pressed", String(which === "browse"));
+  $("tabHave").setAttribute("aria-pressed", String(which === "have"));
+  $("tabBisect").setAttribute("aria-pressed", String(which === "bisect"));
 }
-$("tabBrowse").addEventListener("click", () => setTab(true));
-$("tabHave").addEventListener("click", () => { renderHave(); setTab(false); });
+$("tabBrowse").addEventListener("click", () => setTab("browse"));
+$("tabHave").addEventListener("click", () => { renderHave(); setTab("have"); });
+$("tabBisect").addEventListener("click", () => { setTab("bisect"); loadBisect(); });
 
 /* ── boot ─────────────────────────────────────────────────────── */
 (async () => {

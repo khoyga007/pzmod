@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ddmod_gui - local web UI for ddmod. Binds 127.0.0.1 only; stdlib only.
+"""pzmod_gui - local web UI for pzmod. Binds 127.0.0.1 only; stdlib only.
 
-    python ddmod_gui.py [port]
+    python pzmod_gui.py [port]
 """
 import contextlib
 import io
@@ -14,10 +14,10 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-import ddmod
+import pzmod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8772
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8773  # 8772 is ddmod
 
 # Thumbnails are proxied rather than hotlinked so the page works in browsers that
 # block third-party images. The allowlist is what keeps /img from being an open
@@ -28,13 +28,22 @@ IMG_HOSTS = frozenset({"images.steamusercontent.com", "steamuserimages-a.akamaih
 _img_cache = {}
 _img_lock = threading.Lock()
 
-# steamcmd is a single process with one workshop cache; two installs at once would
-# fight over it. One lock for every file-touching command keeps that honest.
+# steamcmd is a single process with one workshop cache, and enable/disable moves
+# folders on disk - one lock over every state-touching command keeps that honest.
 _work = threading.Lock()
 
 
+def bisect_mod():
+    """pzbisect, or None when the module is missing - the GUI still has to boot."""
+    try:
+        import pzbisect
+        return pzbisect
+    except ImportError:
+        return None
+
+
 def capture(fn, *args):
-    """Run a ddmod command, returning its printed lines. ddmod.die() raises SystemExit
+    """Run a pzmod command, returning its printed lines. pzmod.die() raises SystemExit
     (bad id, steamcmd failure) - that must surface as a failed request, not kill the server."""
     buf = io.StringIO()
     try:
@@ -51,11 +60,32 @@ def capture(fn, *args):
 
 
 def snapshot():
-    st = ddmod.read_state()
-    return {"game": ddmod.GAME, "mods": ddmod.MODS,
-            "sorts": ddmod.SORTS, "tags": ddmod.TAGS,
-            "installed": {wid: dict(e, present=bool(ddmod.folder_of(wid)))
-                          for wid, e in st.items()}}
+    state = pzmod.read_state()
+    installed = {}
+    for wid, entry in state.items():
+        folders = [{"name": f, "status": pzmod.folder_status(f)}
+                   for f in entry.get("folders", []) if isinstance(f, str)]
+        installed[wid] = {"title": entry.get("title") or wid,
+                          "size": entry.get("size") or 0,
+                          "updated": entry.get("updated") or 0,
+                          "modids": entry.get("modids", []),
+                          "require": entry.get("require", []),
+                          "folders": folders,
+                          "present": any(f["status"] in ("enabled", "disabled", "collision")
+                                         for f in folders)}
+    module = bisect_mod()
+    # Folders on disk that no workshop item claims: mods copied in by hand.
+    known = {f["name"] for e in installed.values() for f in e["folders"]}
+    loose = []
+    if module:
+        loose = [{"name": n, "enabled": on} for n, on in module.installed_folders()
+                 if n not in known]
+    return {"game": pzmod.GAME, "mods": pzmod.MODS, "off": pzmod.OFF,
+            "sorts": pzmod.SORTS, "tags": pzmod.TAGS,
+            "installed": installed,
+            "loose": loose,
+            "missing": pzmod.missing_requirements(state),
+            "bisect_ready": module is not None}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -87,7 +117,7 @@ def fetch_img(url):
     with _img_lock:
         if url in _img_cache:
             return _img_cache[url]
-    with _img_opener.open(urllib.request.Request(url, headers=ddmod.UA), timeout=30) as r:
+    with _img_opener.open(urllib.request.Request(url, headers=pzmod.UA), timeout=30) as r:
         blob = r.read(8 * 1024 * 1024)
     # Steam hands these back as application/octet-stream, so sniff the magic bytes
     # instead of trusting the header - and refuse to relay anything that is not an image.
@@ -110,28 +140,57 @@ def card(d):
             "size": int(d.get("file_size") or 0),
             "updated": d.get("time_updated") or 0,
             "tags": [t["tag"] for t in d.get("tags", [])],
-            "summary": ddmod.strip_bb(d.get("description")).replace("\r", "").strip()[:220]}
+            "summary": pzmod.strip_bb(d.get("description")).replace("\r", "").strip()[:220]}
 
 
 def listing(q, sort, page, tags):
-    ids = ddmod.browse(q, sort, page, tags)
-    meta = ddmod.details(ids)
+    ids = pzmod.browse(q, sort, page, tags)
+    meta = pzmod.details(ids)
     # Steam's own ordering is the useful one; details() comes back unordered.
     return [card(meta[i]) for i in ids if i in meta]
 
 
 def detail(wid):
-    d = ddmod.details([wid]).get(wid)
+    d = pzmod.details([wid]).get(wid)
     if not d:
         return {"error": "not found"}
     out = card(d)
-    out["description"] = ddmod.strip_bb(d.get("description")).replace("\r", "")
-    out["children"] = len(ddmod.children(wid))
+    out["description"] = pzmod.strip_bb(d.get("description")).replace("\r", "")
+    out["children"] = len(pzmod.children(wid))
     out["created"] = d.get("time_created") or 0
     out["views"] = d.get("views") or 0
     out["favorited"] = d.get("favorited") or 0
-    out["folder"] = ddmod.folder_of(wid) or ""
+    state = pzmod.read_state()
+    entry = state.get(wid, {})
+    out["folders"] = [{"name": f, "status": pzmod.folder_status(f)}
+                      for f in entry.get("folders", []) if isinstance(f, str)]
+    out["modids"] = entry.get("modids", [])
+    # Required Items lives on the workshop page, so it is known before installing.
+    try:
+        req = pzmod.requires(wid)
+    except pzmod.Blocked:
+        req = []
+        out["req_blocked"] = True
+    meta = pzmod.details(req) if req else {}
+    out["required"] = [{"id": r, "title": (meta.get(r) or {}).get("title") or r,
+                        "installed": bool(state.get(r))} for r in req]
     return out
+
+
+def bisect_view():
+    """Bisect state plus the split the UI has to explain, or why it is unavailable."""
+    module = bisect_mod()
+    if not module:
+        return {"ready": False, "error": "thiếu pzbisect.py"}
+    st = module.bisect_state()
+    enabled = set(st.get("enabled_now") or [])
+    cands = st.get("candidates") or []
+    # bisect_state does not name the halves; the enabled candidates ARE this round's half.
+    st["tested"] = [c for c in cands if c in enabled]
+    st["untested"] = [c for c in cands if c not in enabled]
+    st["ready"] = True
+    st["running"] = bool(cands) and not st.get("done")
+    return st
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -175,15 +234,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.wfile.write(blob)
             if url.path == "/api/state":
                 return self.send(snapshot())
+            if url.path == "/api/bisect":
+                return self.send(bisect_view())
             if url.path == "/api/browse":
                 page = max(1, min(50, int(one("page", "1") or 1)))
                 sort = one("sort", "trend")
-                if sort not in ddmod.SORTS:
+                if sort not in pzmod.SORTS:
                     sort = "trend"
-                tags = [t for t in qs.get("tag", []) if t in ddmod.TAGS]
+                tags = [t for t in qs.get("tag", []) if t in pzmod.TAGS]
                 try:
                     items = listing(one("q"), sort, page, tags)
-                except ddmod.Blocked as e:
+                except pzmod.Blocked as e:
                     return self.send({"error": str(e)}, code=503)
                 return self.send({"items": items, "page": page})
             if url.path == "/api/detail":
@@ -195,6 +256,16 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send({"error": "%s: %s" % (type(e).__name__, e)}, code=500)
 
+    def toggle(self, folder, on):
+        module = bisect_mod()
+        if not module:
+            return self.send({"error": "thiếu pzbisect.py"}, code=500)
+        try:
+            (module.enable if on else module.disable)(folder)
+        except (ValueError, RuntimeError, OSError) as e:
+            return self.send({"ok": False, "log": [], "error": str(e)})
+        return self.send({"ok": True, "log": ["%s %s" % ("bật" if on else "tắt", folder)]})
+
     def do_POST(self):
         url = urlparse(self.path)
         try:
@@ -203,29 +274,53 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.send({"error": "bad request body"}, code=400)
         wid = str(body.get("id") or "")
+        folder = body.get("folder")
         try:
             if url.path in ("/api/install", "/api/remove") and not wid.isdigit():
                 return self.send({"error": "bad id"}, code=400)
             with _work:
                 if url.path == "/api/install":
-                    return self.send(capture(ddmod.cmd_install, [wid], bool(body.get("force"))))
+                    return self.send(capture(pzmod.cmd_install, [wid], bool(body.get("force"))))
                 if url.path == "/api/remove":
-                    return self.send(capture(ddmod.cmd_remove, [wid]))
+                    return self.send(capture(pzmod.cmd_remove, [wid]))
                 if url.path == "/api/update":
-                    return self.send(capture(ddmod.cmd_update, []))
+                    return self.send(capture(pzmod.cmd_update, []))
+                if url.path in ("/api/enable", "/api/disable"):
+                    if not isinstance(folder, str) or not folder:
+                        return self.send({"error": "bad folder"}, code=400)
+                    return self.toggle(folder, url.path.endswith("enable"))
+                if url.path == "/api/bisect":
+                    module = bisect_mod()
+                    if not module:
+                        return self.send({"error": "thiếu pzbisect.py"}, code=500)
+                    op = str(body.get("op") or "")
+                    try:
+                        if op == "start":
+                            module.bisect_start(body.get("names") or None)
+                        elif op == "bad":
+                            module.bisect_mark(True)
+                        elif op == "good":
+                            module.bisect_mark(False)
+                        elif op == "stop":
+                            module.bisect_stop()
+                        else:
+                            return self.send({"error": "bad op"}, code=400)
+                    except (ValueError, RuntimeError, OSError) as e:
+                        return self.send({"ok": False, "error": str(e), "state": bisect_view()})
+                    return self.send({"ok": True, "state": bisect_view()})
             self.send({"error": "not found"}, code=404)
         except Exception as e:
             self.send({"error": "%s: %s" % (type(e).__name__, e)}, code=500)
 
 
 if __name__ == "__main__":
-    if not os.path.isdir(ddmod.GAME):
-        ddmod.die("game folder not found: %s (set DD_GAME to override)" % ddmod.GAME)
+    if not os.path.isdir(pzmod.GAME):
+        pzmod.die("không thấy thư mục game: %s (đặt PZ_GAME để đổi)" % pzmod.GAME)
     # Loopback only - this server installs files and must not be reachable from the network.
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = "http://127.0.0.1:%d/" % PORT
-    print("ddmod GUI -> %s   (Ctrl+C to stop)" % url)
-    if not os.environ.get("DDMOD_NOOPEN"):
+    print("pzmod GUI -> %s   (Ctrl+C to stop)" % url)
+    if not os.environ.get("PZMOD_NOOPEN"):
         threading.Timer(0.6, webbrowser.open, [url]).start()
     try:
         srv.serve_forever()
