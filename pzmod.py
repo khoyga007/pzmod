@@ -14,6 +14,7 @@ Usage:
     pzmod bisect <operation>   start/state/bad/good/stop a mod bisect
     pzmod selftest             run internal checks
 """
+import collections
 import contextlib
 import hashlib
 import io
@@ -308,24 +309,57 @@ def _mod_metadata(roots):
     return modids, required
 
 
-def download(wid, force=False):
-    """Download one workshop item through SteamCMD and return its item folder."""
+def _steamcmd_success_id(line):
+    marker = "Success. Downloaded item "
+    if marker not in line:
+        return None
+    return line.split(marker, 1)[1].split(None, 1)[0]
+
+
+def download_many(wids, force=False):
+    """Download workshop items through one SteamCMD process."""
+    if any(not wid.isdigit() for wid in wids):
+        die("Workshop id không hợp lệ")
     exe = steamcmd()
     root = os.path.join(os.path.dirname(exe), "steamapps", "workshop")
-    dest = os.path.join(root, "content", APPID, wid)
     if force:
-        shutil.rmtree(dest, ignore_errors=True)
+        for wid in wids:
+            shutil.rmtree(os.path.join(root, "content", APPID, wid), ignore_errors=True)
         manifest = os.path.join(root, "appworkshop_%s.acf" % APPID)
         if os.path.exists(manifest):
             os.remove(manifest)
-    command = [exe, "+login", "anonymous", "+workshop_download_item", APPID, wid, "+quit"]
-    output = subprocess.run(command, capture_output=True, text=True, errors="replace").stdout
-    if "Success. Downloaded item" not in output and not os.path.isdir(dest):
-        tail = " | ".join(line.strip() for line in output.splitlines()[-4:] if line.strip())
-        die("steamcmd thất bại với %s: %s" % (wid, tail))
-    if not os.path.isdir(dest):
-        die("steamcmd báo thành công nhưng thiếu thư mục %s" % dest)
-    return dest
+    command = [exe, "+login", "anonymous"]
+    for wid in wids:
+        command.extend(["+workshop_download_item", APPID, wid])
+    command.append("+quit")
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, errors="replace")
+    completed, tail = set(), collections.deque(maxlen=4)
+    for line in process.stdout:
+        line = line.rstrip()
+        completed_id = _steamcmd_success_id(line)
+        if completed_id in wids:
+            completed.add(completed_id)
+            print("  . steamcmd tải xong %s" % completed_id)
+        if line:
+            tail.append(line)
+    process.wait()
+    downloaded = {}
+    for wid in wids:
+        dest = os.path.join(root, "content", APPID, wid)
+        if (wid in completed or os.path.isdir(dest)) and os.path.isdir(dest):
+            downloaded[wid] = dest
+    if not downloaded and wids:
+        print("  ! steamcmd không tải được mục nào: %s" % " | ".join(tail))
+    return downloaded
+
+
+def download(wid, force=False):
+    """Download one workshop item through SteamCMD and return its item folder."""
+    result = download_many([wid], force=force)
+    if wid not in result:
+        die("steamcmd thất bại với %s" % wid)
+    return result[wid]
 
 
 def _restore_transaction(installed, moved):
@@ -342,7 +376,7 @@ def _restore_transaction(installed, moved):
             shutil.move(backup, original)
 
 
-def install_one(wid, detail=None, force=False):
+def install_one(wid, detail=None, force=False, source=None, downloaded=False):
     detail = detail or details([wid]).get(wid)
     if not detail:
         print("  ! %s: mod đã bị xoá hoặc đặt riêng tư" % wid)
@@ -360,7 +394,10 @@ def install_one(wid, detail=None, force=False):
         print("  = %s đã là bản mới nhất" % title)
         return True
 
-    source = download(wid, force=bool(previous) or force)
+    if downloaded and source is None:
+        print("  ! %s: steamcmd không tải được mục này" % wid)
+        return False
+    source = source or download(wid, force=bool(previous) or force)
     roots = _mod_roots(source)
     if not roots:
         print("  ! %s: không tìm thấy mods/<ModName>/mod.info" % title)
@@ -513,8 +550,11 @@ def cmd_install(args, force=False, deps=True):
             print("kèm %d mod bắt buộc: %s" % (len(extra), ", ".join(
                 names.get(wid, {}).get("title", wid) for wid in extra)))
     metadata = details(order)
+    state = read_state()
+    sources = download_many(order, force=force or any(wid in state for wid in order))
     for wid in order:
-        install_one(wid, metadata.get(wid), force=force)
+        install_one(wid, metadata.get(wid), force=force,
+                    source=sources.get(wid), downloaded=True)
     missing = missing_requirements()
     if missing:
         print("  ! thiếu mod bắt buộc: %s" % ", ".join(missing))
@@ -1007,6 +1047,8 @@ def cmd_selftest(args):
     assert as_id("498441420") == "498441420"
     assert as_id("https://steamcommunity.com/sharedfiles/filedetails/?id=123&searchtext=x") == "123"
     assert as_id(" 456 ") == "456"
+    assert _steamcmd_success_id("Success. Downloaded item 456 to x") == "456"
+    assert _steamcmd_success_id("ERROR! Download item 456 failed") is None
     assert strip_bb("a [url=x]link[/url] b") == "a link b"
     long_tag = "[url=https://example.invalid/" + "x" * 80 + "]"
     assert strip_bb("a " + long_tag + "link[/url] b") == "a link b"

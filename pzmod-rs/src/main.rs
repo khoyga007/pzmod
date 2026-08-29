@@ -7,8 +7,9 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
@@ -770,22 +771,31 @@ fn steamcmd_exe() -> Result<PathBuf, String> {
     Err("Không tìm thấy steamcmd.exe".into())
 }
 
-fn steamcmd_args(id: &str) -> Vec<OsString> {
-    [
-        "+login",
-        "anonymous",
-        "+workshop_download_item",
-        APPID,
-        id,
-        "+quit",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect()
+fn steamcmd_args(ids: &[String]) -> Vec<OsString> {
+    let mut args = vec![OsString::from("+login"), OsString::from("anonymous")];
+    for id in ids {
+        args.extend([
+            OsString::from("+workshop_download_item"),
+            OsString::from(APPID),
+            OsString::from(id),
+        ]);
+    }
+    args.push(OsString::from("+quit"));
+    args
 }
 
-fn download_item(id: &str, force: bool) -> Result<PathBuf, String> {
-    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+fn steamcmd_success_id(line: &str) -> Option<&str> {
+    line.split_once("Success. Downloaded item ")?
+        .1
+        .split_whitespace()
+        .next()
+}
+
+fn download_items(ids: &[String], force: bool) -> Result<HashMap<String, PathBuf>, String> {
+    if ids
+        .iter()
+        .any(|id| id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()))
+    {
         return Err("Workshop id không hợp lệ".into());
     }
     let executable = steamcmd_exe()?;
@@ -794,11 +804,13 @@ fn download_item(id: &str, force: bool) -> Result<PathBuf, String> {
         .ok_or("steamcmd.exe không có thư mục cha")?
         .join("steamapps")
         .join("workshop");
-    let destination = workshop.join("content").join(APPID).join(id);
     if force {
-        if destination.is_dir() {
-            fs::remove_dir_all(&destination)
-                .map_err(|e| format!("Không dọn được cache {}: {e}", destination.display()))?;
+        for id in ids {
+            let destination = workshop.join("content").join(APPID).join(id);
+            if destination.is_dir() {
+                fs::remove_dir_all(&destination)
+                    .map_err(|e| format!("Không dọn được cache {}: {e}", destination.display()))?;
+            }
         }
         let manifest = workshop.join(format!("appworkshop_{APPID}.acf"));
         if manifest.is_file() {
@@ -806,30 +818,56 @@ fn download_item(id: &str, force: bool) -> Result<PathBuf, String> {
                 .map_err(|e| format!("Không dọn được {}: {e}", manifest.display()))?;
         }
     }
-    let output = Command::new(&executable)
-        .args(steamcmd_args(id))
-        .output()
+    let mut child = Command::new(&executable)
+        .args(steamcmd_args(ids))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
         .map_err(|e| format!("Không chạy được steamcmd: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stdout.contains("Success. Downloaded item") && !destination.is_dir() {
-        let tail = stdout
-            .lines()
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join(" | ");
-        return Err(format!("steamcmd thất bại với {id}: {tail}"));
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Không đọc được stdout steamcmd")?;
+    let requested: HashSet<_> = ids.iter().map(String::as_str).collect();
+    let mut completed = HashSet::new();
+    let mut tail = VecDeque::with_capacity(4);
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| format!("Không đọc được stdout steamcmd: {e}"))?;
+        if let Some(id) = steamcmd_success_id(&line).filter(|id| requested.contains(id)) {
+            completed.insert(id.to_string());
+            eprintln!("steamcmd: tải xong {id}");
+        }
+        if !line.trim().is_empty() {
+            if tail.len() == 4 {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
     }
-    if !destination.is_dir() {
-        return Err(format!(
-            "steamcmd báo thành công nhưng thiếu {}",
-            destination.display()
-        ));
+    child
+        .wait()
+        .map_err(|e| format!("Không chờ được steamcmd: {e}"))?;
+
+    let mut downloaded = HashMap::new();
+    for id in ids {
+        let destination = workshop.join("content").join(APPID).join(id);
+        if (completed.contains(id) || destination.is_dir()) && destination.is_dir() {
+            downloaded.insert(id.clone(), destination);
+        }
     }
-    Ok(destination)
+    if downloaded.is_empty() && !ids.is_empty() {
+        eprintln!(
+            "steamcmd không tải được mục nào: {}",
+            tail.into_iter().collect::<Vec<_>>().join(" | ")
+        );
+    }
+    Ok(downloaded)
+}
+
+fn download_item(id: &str, force: bool) -> Result<PathBuf, String> {
+    download_items(&[id.to_string()], force)?
+        .remove(id)
+        .ok_or_else(|| format!("steamcmd thất bại với {id}"))
 }
 
 #[derive(Debug)]
@@ -1536,6 +1574,17 @@ fn install_from_source(
 }
 
 fn install_one(id: &str, detail: &Value, force: bool, user: &Path) -> Result<Vec<String>, String> {
+    install_one_with_source(id, detail, force, user, None, false)
+}
+
+fn install_one_with_source(
+    id: &str,
+    detail: &Value,
+    force: bool,
+    user: &Path,
+    source: Option<&Path>,
+    download_attempted: bool,
+) -> Result<Vec<String>, String> {
     if value_u64(detail, "consumer_app_id") != 108600 {
         return Err(format!(
             "thuộc app {}, không phải Project Zomboid",
@@ -1556,8 +1605,16 @@ fn install_one(id: &str, detail: &Value, force: bool, user: &Path) -> Result<Vec
             value_string(detail, "title")
         )]);
     }
-    let source = download_item(id, previous.is_some() || force)?;
-    install_from_source(id, detail, &source, user)
+    let downloaded;
+    let source = match source {
+        Some(source) => source,
+        None if download_attempted => return Err("steamcmd không tải được mục này".into()),
+        None => {
+            downloaded = download_item(id, previous.is_some() || force)?;
+            &downloaded
+        }
+    };
+    install_from_source(id, detail, source, user)
 }
 
 fn walk_dependencies(
@@ -1634,10 +1691,20 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
     }
 
     let metadata = details(&order)?;
+    let state = managed_state(user);
+    let refresh_cache = force || order.iter().any(|item| state.contains_key(item));
+    let downloaded = download_items(&order, refresh_cache)?;
     let mut ok = true;
     for item in order {
         match metadata.get(&item) {
-            Some(detail) => match install_one(&item, detail, force, user) {
+            Some(detail) => match install_one_with_source(
+                &item,
+                detail,
+                force,
+                user,
+                downloaded.get(&item).map(PathBuf::as_path),
+                true,
+            ) {
                 Ok(lines) => log.extend(lines),
                 Err(error) => {
                     ok = false;
@@ -2201,7 +2268,7 @@ mod tests {
 
     #[test]
     fn steamcmd_argv_matches_python_lane() {
-        let args: Vec<_> = steamcmd_args("123")
+        let args: Vec<_> = steamcmd_args(&["123".into(), "456".into()])
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
             .collect();
@@ -2213,9 +2280,17 @@ mod tests {
                 "+workshop_download_item",
                 "108600",
                 "123",
+                "+workshop_download_item",
+                "108600",
+                "456",
                 "+quit"
             ]
         );
+        assert_eq!(
+            steamcmd_success_id("Success. Downloaded item 456 to x"),
+            Some("456")
+        );
+        assert_eq!(steamcmd_success_id("ERROR! Download item 456 failed"), None);
     }
 
     #[test]
