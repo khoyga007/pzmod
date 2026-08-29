@@ -14,7 +14,9 @@ Usage:
     pzmod bisect <operation>   start/state/bad/good/stop a mod bisect
     pzmod selftest             run internal checks
 """
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -344,6 +346,27 @@ def install_one(wid, detail=None, force=False):
         return False
 
     old_folders = set(_entry_folders(previous))
+    old_locations = {}
+    for folder in old_folders:
+        try:
+            enabled = _child(MODS, folder)
+            disabled = _child(OFF, folder)
+        except ValueError as error:
+            print("  ! %s: %s" % (title, error))
+            return False
+        if os.path.isdir(enabled) and os.path.isdir(disabled):
+            print("  ! %s: %s có ở cả mods và mods_off; giữ nguyên để người dùng xử lý" %
+                  (title, folder))
+            return False
+        if any(os.path.exists(path) and not os.path.isdir(path)
+               for path in (enabled, disabled)):
+            print("  ! %s: %s trùng với một file; giữ nguyên" % (title, folder))
+            return False
+        if os.path.isdir(enabled):
+            old_locations[folder] = MODS
+        elif os.path.isdir(disabled):
+            old_locations[folder] = OFF
+
     for folder, _, _ in roots:
         try:
             destinations = (_child(MODS, folder), _child(OFF, folder))
@@ -377,10 +400,22 @@ def install_one(wid, detail=None, force=False):
                     shutil.move(original, saved)
                     moved.append((saved, original))
 
+        new_folders = {folder for folder, _, _ in roots}
         for folder, _, _ in roots:
-            destination = _child(MODS, folder)
+            destination = _child(old_locations.get(folder, MODS), folder)
             shutil.move(_child(staged, folder), destination)
             installed.append(destination)
+
+        preserved = []
+        for folder in sorted(old_folders - new_folders, key=str.lower):
+            base = old_locations.get(folder)
+            if not base:
+                continue
+            saved = os.path.join(backup, "mods" if base == MODS else "mods_off", folder)
+            destination = _child(OFF, folder)
+            installed.append(destination)
+            shutil.copytree(saved, destination)
+            preserved.append(folder)
 
         state[wid] = {
             "title": title,
@@ -404,7 +439,9 @@ def install_one(wid, detail=None, force=False):
         if not keep_transaction:
             shutil.rmtree(transaction, ignore_errors=True)
 
-    print("  + %s -> %d thư mục trong mods (%.1f KB)" %
+    for folder in preserved:
+        print("  ! %s không còn trong bản mới, đã chuyển sang mods_off" % folder)
+    print("  + %s -> %d thư mục (%.1f KB)" %
           (title, len(roots), int(detail.get("file_size") or 0) / 1024))
     return True
 
@@ -569,7 +606,7 @@ def cmd_search(args):
 
 
 def strip_bb(text):
-    return re.sub(r"\[[^\]]{0,40}\]", "", text or "")
+    return re.sub(r"\[[^\]]{0,200}\]", "", text or "")
 
 
 def cmd_info(args):
@@ -633,24 +670,50 @@ def cmd_remove(args):
         if not entry:
             print("  ? %s chưa được pzmod cài" % wid)
             continue
+        paths = []
         safe = True
         for folder in _entry_folders(entry):
             try:
-                paths = (_child(MODS, folder), _child(OFF, folder))
+                folder_paths = (_child(MODS, folder), _child(OFF, folder))
             except ValueError as error:
                 print("  ! %s: %s" % (wid, error))
                 safe = False
                 continue
-            for path in paths:
-                if os.path.isdir(path):
-                    shutil.rmtree(path)
-                elif os.path.exists(path):
+            for path in folder_paths:
+                if os.path.exists(path) and not os.path.isdir(path):
                     print("  ! từ chối xoá vì không phải thư mục: %s" % path)
                     safe = False
-        if safe:
-            print("  - %s đã xoá" % entry.get("title", wid))
+                elif os.path.isdir(path):
+                    paths.append(path)
+        if not safe:
+            continue
+
+        os.makedirs(USER, exist_ok=True)
+        transaction = tempfile.mkdtemp(prefix=".pzmod-remove-%s-" % wid, dir=USER)
+        moved, keep_transaction = [], False
+        try:
+            for path in paths:
+                label = "mods" if os.path.dirname(path) == MODS else "mods_off"
+                saved = os.path.join(transaction, label, os.path.basename(path))
+                os.makedirs(os.path.dirname(saved), exist_ok=True)
+                shutil.move(path, saved)
+                moved.append((saved, path))
             state.pop(wid, None)
-    write_state(state)
+            write_state(state)
+        except Exception as error:
+            state[wid] = entry
+            try:
+                _restore_transaction([], moved)
+            except Exception as rollback_error:
+                keep_transaction = True
+                print("  ! KHÔNG KHÔI PHỤC ĐƯỢC; bản sao còn tại %s (%s)" %
+                      (transaction, rollback_error))
+            print("  ! %s: xoá thất bại (%s)" % (entry.get("title", wid), error))
+            continue
+        finally:
+            if not keep_transaction:
+                shutil.rmtree(transaction, ignore_errors=True)
+        print("  - %s đã xoá" % entry.get("title", wid))
 
 
 def cmd_update(args):
@@ -742,11 +805,80 @@ def check_cache():
         CACHE_DIR = keep
 
 
+def check_mod_transactions():
+    """Exercise update/remove safety against a throwaway PZ user tree."""
+    global USER, MODS, OFF, STATE, download, write_state
+    keep_paths = USER, MODS, OFF, STATE
+    real_download = download
+    real_write_state = write_state
+    try:
+        with tempfile.TemporaryDirectory(prefix="pzmod-files-") as root:
+            USER = root
+            MODS = os.path.join(root, "mods")
+            OFF = os.path.join(root, "mods_off")
+            STATE = os.path.join(root, ".pzmod.json")
+            os.makedirs(os.path.join(OFF, "Keep"))
+            os.makedirs(os.path.join(MODS, "Retired"))
+            with open(os.path.join(OFF, "Keep", "old.txt"), "w") as old_file:
+                old_file.write("old")
+            with open(os.path.join(MODS, "Retired", "retired.txt"), "w") as old_file:
+                old_file.write("retired")
+            write_state({"1": {"title": "Test", "updated": 1, "size": 1,
+                               "folders": ["Keep", "Retired"],
+                               "modids": ["Test"], "require": []}})
+
+            source = os.path.join(root, "source")
+            os.makedirs(os.path.join(source, "mods", "Keep"))
+            with open(os.path.join(source, "mods", "Keep", "mod.info"), "w") as info_file:
+                info_file.write("id=Test\n")
+            with open(os.path.join(source, "mods", "Keep", "new.txt"), "w") as new_file:
+                new_file.write("new")
+            download = lambda wid, force=False: source
+            detail = {"consumer_app_id": 108600, "title": "Test",
+                      "time_updated": 2, "file_size": 2}
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert install_one("1", detail, force=True)
+            assert os.path.isfile(os.path.join(OFF, "Keep", "new.txt"))
+            assert not os.path.exists(os.path.join(MODS, "Keep"))
+            assert os.path.isfile(os.path.join(OFF, "Retired", "retired.txt"))
+            assert read_state()["1"]["folders"] == ["Keep"]
+            assert "! Retired không còn trong bản mới, đã chuyển sang mods_off" in output.getvalue()
+
+            blocker = os.path.join(MODS, "Blocker")
+            with open(blocker, "w") as blocker_file:
+                blocker_file.write("do not delete")
+            state = read_state()
+            state["1"]["folders"].append("Blocker")
+            write_state(state)
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_remove(["1"])
+            assert os.path.isdir(os.path.join(OFF, "Keep"))
+            assert "1" in read_state(), "remove must preflight every path before moving any"
+            os.remove(blocker)
+            write_state = lambda state: (_ for _ in ()).throw(OSError("forced state failure"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_remove(["1"])
+            assert os.path.isdir(os.path.join(OFF, "Keep"))
+            assert "1" in read_state(), "remove must roll files back when state write fails"
+            write_state = real_write_state
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_remove(["1"])
+            assert "1" not in read_state()
+            assert not os.path.exists(os.path.join(OFF, "Keep"))
+    finally:
+        USER, MODS, OFF, STATE = keep_paths
+        download = real_download
+        write_state = real_write_state
+
+
 def cmd_selftest(args):
     assert as_id("498441420") == "498441420"
     assert as_id("https://steamcommunity.com/sharedfiles/filedetails/?id=123&searchtext=x") == "123"
     assert as_id(" 456 ") == "456"
     assert strip_bb("a [url=x]link[/url] b") == "a link b"
+    long_tag = "[url=https://example.invalid/" + "x" * 80 + "]"
+    assert strip_bb("a " + long_tag + "link[/url] b") == "a link b"
     with tempfile.TemporaryDirectory(prefix="pzmod-logic-") as root:
         mods = os.path.join(root, "mods")
         os.makedirs(os.path.join(mods, "Direct"))
@@ -769,6 +901,7 @@ def cmd_selftest(args):
         assert modids == ["BuildID", "DirectID"]
         assert required == ["DirectID", "Other", "A", "B"]
         assert _missing_modids(required, modids) == ["A", "B", "Other"]
+    check_mod_transactions()
     check_cache()
     try:
         assert len(browse(sort="trend")) > 10, "workshop browse layout changed"
