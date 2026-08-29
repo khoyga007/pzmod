@@ -2294,11 +2294,18 @@ mod tests {
             "suspect": Value::Null,
             "done": false
         });
-        fs::write(&state_file, serde_json::to_string_pretty(&dirty_state).unwrap()).unwrap();
+        fs::write(
+            &state_file,
+            serde_json::to_string_pretty(&dirty_state).unwrap(),
+        )
+        .unwrap();
 
         // Must fail upfront and not move ModA
         assert!(bisect_mark_internal(false, &base).is_err());
-        assert!(mods.join("ModA").is_dir(), "ModA không được dời dở dang khi gặp tên bẩn");
+        assert!(
+            mods.join("ModA").is_dir(),
+            "ModA không được dời dở dang khi gặp tên bẩn"
+        );
 
         fs::remove_file(&state_file).ok();
         fs::remove_dir_all(&base).ok();
