@@ -122,6 +122,105 @@ fn work_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
         .map_err(|_| "Khoá thao tác mod bị lỗi".to_string())
 }
 
+const PROGRESS_CAP: usize = 500;
+
+#[derive(Default)]
+struct ProgressStore {
+    seq: usize,
+    lines: VecDeque<String>,
+    active: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProgressReply {
+    seq: usize,
+    lines: Vec<String>,
+    active: bool,
+}
+
+impl ProgressStore {
+    fn push(&mut self, line: String) {
+        self.seq = self.seq.saturating_add(1);
+        if self.lines.len() == PROGRESS_CAP {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line);
+    }
+
+    fn snapshot(&self, since: usize) -> ProgressReply {
+        let first = self.seq.saturating_sub(self.lines.len());
+        let offset = since.saturating_sub(first).min(self.lines.len());
+        ProgressReply {
+            seq: self.seq,
+            lines: self.lines.iter().skip(offset).cloned().collect(),
+            active: self.active,
+        }
+    }
+}
+
+fn progress_store() -> &'static Mutex<ProgressStore> {
+    static STORE: OnceLock<Mutex<ProgressStore>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(ProgressStore::default()))
+}
+
+fn progress_push(line: impl Into<String>) {
+    if let Ok(mut store) = progress_store().lock() {
+        store.push(line.into());
+    }
+}
+
+fn progress_lines(lines: &[String]) {
+    for line in lines {
+        progress_push(line.clone());
+    }
+}
+
+struct ProgressJob;
+
+impl ProgressJob {
+    fn start() -> Self {
+        if let Ok(mut store) = progress_store().lock() {
+            store.lines.clear();
+            store.active = true;
+        }
+        Self
+    }
+}
+
+impl Drop for ProgressJob {
+    fn drop(&mut self) {
+        if let Ok(mut store) = progress_store().lock() {
+            store.active = false;
+        }
+    }
+}
+
+async fn blocking_work<T, F>(track_progress: bool, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let _work_guard = work_guard()?;
+        let _progress_guard = track_progress.then(ProgressJob::start);
+        work()
+    })
+    .await
+    .map_err(|error| format!("Tác vụ nền bị lỗi: {error}"))?
+}
+
+#[tauri::command]
+fn progress(since: usize) -> ProgressReply {
+    progress_store()
+        .lock()
+        .map(|store| store.snapshot(since))
+        .unwrap_or(ProgressReply {
+            seq: 0,
+            lines: Vec::new(),
+            active: false,
+        })
+}
+
 fn http_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -792,6 +891,14 @@ fn steamcmd_success_id(line: &str) -> Option<&str> {
 }
 
 fn download_items(ids: &[String], force: bool) -> Result<HashMap<String, PathBuf>, String> {
+    download_items_labeled(ids, force, None)
+}
+
+fn download_items_labeled(
+    ids: &[String],
+    force: bool,
+    labels: Option<&HashMap<String, String>>,
+) -> Result<HashMap<String, PathBuf>, String> {
     if ids
         .iter()
         .any(|id| id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()))
@@ -834,8 +941,20 @@ fn download_items(ids: &[String], force: bool) -> Result<HashMap<String, PathBuf
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|e| format!("Không đọc được stdout steamcmd: {e}"))?;
         if let Some(id) = steamcmd_success_id(&line).filter(|id| requested.contains(id)) {
-            completed.insert(id.to_string());
+            let fresh = completed.insert(id.to_string());
             eprintln!("steamcmd: tải xong {id}");
+            if fresh {
+                progress_push(format!("steamcmd: tải xong {id}"));
+                let label = labels
+                    .and_then(|labels| labels.get(id))
+                    .map(String::as_str)
+                    .unwrap_or(id);
+                progress_push(format!(
+                    "tải xong {label} ({}/{})",
+                    completed.len(),
+                    ids.len()
+                ));
+            }
         }
         if !line.trim().is_empty() {
             if tail.len() == 4 {
@@ -853,19 +972,31 @@ fn download_items(ids: &[String], force: bool) -> Result<HashMap<String, PathBuf
         let destination = workshop.join("content").join(APPID).join(id);
         if (completed.contains(id) || destination.is_dir()) && destination.is_dir() {
             downloaded.insert(id.clone(), destination);
+        } else {
+            progress_push(format!("! {id}: steamcmd không tải được mục này"));
         }
     }
     if downloaded.is_empty() && !ids.is_empty() {
-        eprintln!(
-            "steamcmd không tải được mục nào: {}",
+        let line = format!(
+            "! steamcmd không tải được mục nào: {}",
             tail.into_iter().collect::<Vec<_>>().join(" | ")
         );
+        eprintln!("{line}");
+        progress_push(line);
     }
     Ok(downloaded)
 }
 
 fn download_item(id: &str, force: bool) -> Result<PathBuf, String> {
-    download_items(&[id.to_string()], force)?
+    download_item_labeled(id, force, None)
+}
+
+fn download_item_labeled(id: &str, force: bool, label: Option<String>) -> Result<PathBuf, String> {
+    let label = label
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| id.to_string());
+    let labels = HashMap::from([(id.to_string(), label)]);
+    download_items_labeled(&[id.to_string()], force, Some(&labels))?
         .remove(id)
         .ok_or_else(|| format!("steamcmd thất bại với {id}"))
 }
@@ -1436,7 +1567,7 @@ fn state_internal(game: &Path, user: &Path) -> Result<State, String> {
         bisect_ready: true,
         ported: vec![
             "state", "enable", "disable", "browse", "detail", "bisect", "install", "remove",
-            "update", "prefetch",
+            "update", "prefetch", "progress",
         ],
     })
 }
@@ -1470,10 +1601,12 @@ fn move_folder(from: &Path, to: &Path, folder: &str, verb: &str) -> Result<Done,
         ));
     }
     if is_dir(&dst) {
-        return Ok(Done {
+        let done = Done {
             ok: true,
             log: vec![format!("'{folder}' đã {verb} sẵn.")],
-        });
+        };
+        progress_lines(&done.log);
+        return Ok(done);
     }
     if !is_dir(&src) {
         return Err(format!(
@@ -1481,10 +1614,12 @@ fn move_folder(from: &Path, to: &Path, folder: &str, verb: &str) -> Result<Done,
         ));
     }
     fs::rename(&src, &dst).map_err(|e| format!("Không {verb} được '{folder}': {e}"))?;
-    Ok(Done {
+    let done = Done {
         ok: true,
         log: vec![format!("Đã {verb} '{folder}'.")],
-    })
+    };
+    progress_lines(&done.log);
+    Ok(done)
 }
 
 #[tauri::command]
@@ -1703,7 +1838,12 @@ fn install_one_with_source(
         Some(source) => source,
         None if download_attempted => return Err("steamcmd không tải được mục này".into()),
         None => {
-            downloaded = download_item(id, previous.is_some() || force)?;
+            let title = value_string(detail, "title");
+            downloaded = if title.is_empty() {
+                download_item(id, previous.is_some() || force)?
+            } else {
+                download_item_labeled(id, previous.is_some() || force, Some(title))?
+            };
             &downloaded
         }
     };
@@ -1760,9 +1900,11 @@ fn resolve_modid(
     modid: &str,
     cache: &mut ResolutionCache,
 ) -> Result<Option<(String, PathBuf)>, String> {
+    progress_push(format!("đang dò mod bắt buộc: {modid}"));
     let key = normalize_required(modid).to_lowercase();
     if let Some(cached) = cache.get(&key).cloned() {
         let Some(id) = cached else {
+            progress_push(format!("không tìm thấy workshop id cho {modid}"));
             return Ok(None);
         };
         let mut sources = download_items(std::slice::from_ref(&id), false)?;
@@ -1770,6 +1912,7 @@ fn resolve_modid(
             .get(&id)
             .is_some_and(|source| source_provides_modid(source, modid).unwrap_or(false))
         {
+            progress_push(format!("đã tìm thấy {modid} ({id})"));
             return Ok(sources.remove(&id).map(|source| (id, source)));
         }
         cache.remove(&key);
@@ -1778,11 +1921,17 @@ fn resolve_modid(
     let candidates = search_modid_candidates(modid)?;
     if candidates.is_empty() {
         cache.insert(key, None);
+        progress_push(format!("không tìm thấy workshop id cho {modid}"));
         return Ok(None);
     }
     let mut sources = download_items(&candidates, false)?;
     let matched = matching_candidate(modid, &candidates, &sources)?;
     cache.insert(key, matched.clone());
+    if let Some(id) = &matched {
+        progress_push(format!("đã tìm thấy {modid} ({id})"));
+    } else {
+        progress_push(format!("không tìm thấy workshop id cho {modid}"));
+    }
     Ok(matched.and_then(|id| sources.remove(&id).map(|source| (id, source))))
 }
 
@@ -1880,7 +2029,8 @@ fn walk_mod_dependencies(
             })
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| provider.clone());
-        log.push(format!("kèm mod bắt buộc: {title} ({provider})"));
+        let line = format!("kèm mod bắt buộc: {title} ({provider})");
+        log.push(line);
 
         let mut workshop_seen = HashSet::new();
         let mut workshop_order = Vec::new();
@@ -1954,7 +2104,7 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
     if todo.is_empty() {
         todo.push(id.to_string());
     } else {
-        log.push(format!(
+        let line = format!(
             "collection {}: {} mod",
             original_meta
                 .get(id)
@@ -1962,7 +2112,8 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
                 .filter(|title| !title.is_empty())
                 .unwrap_or_else(|| id.to_string()),
             todo.len()
-        ));
+        );
+        log.push(line);
     }
     let requested: HashSet<_> = todo.iter().cloned().collect();
     let mut seen = HashSet::new();
@@ -1970,6 +2121,7 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
     for item in todo {
         walk_dependencies(&item, 4, &mut seen, &mut order, &mut log);
     }
+    progress_lines(&log);
     let extra: Vec<_> = order
         .iter()
         .filter(|item| !requested.contains(*item))
@@ -1977,7 +2129,7 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
         .collect();
     if !extra.is_empty() {
         let names = details(&extra)?;
-        log.push(format!(
+        let line = format!(
             "kèm {} mod bắt buộc: {}",
             extra.len(),
             extra
@@ -1991,14 +2143,37 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
-        ));
+        );
+        progress_push(line.clone());
+        log.push(line);
     }
 
     let state = managed_state(user);
     let refresh_cache = force || order.iter().any(|item| state.contains_key(item));
-    let mut downloaded = download_items(&order, refresh_cache)?;
+    let mut metadata = details(&order)?;
+    let labels: HashMap<_, _> = order
+        .iter()
+        .map(|item| {
+            let title = metadata
+                .get(item)
+                .map(|detail| value_string(detail, "title"))
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| item.clone());
+            (item.clone(), title)
+        })
+        .collect();
+    let mut downloaded = download_items_labeled(&order, refresh_cache, Some(&labels))?;
+    let logged = log.len();
     let (order, resolutions) = expand_mod_dependencies(order, user, &mut downloaded, &mut log)?;
-    let metadata = details(&order)?;
+    progress_lines(&log[logged..]);
+    let missing_metadata: Vec<_> = order
+        .iter()
+        .filter(|item| !metadata.contains_key(*item))
+        .cloned()
+        .collect();
+    if !missing_metadata.is_empty() {
+        metadata.extend(details(&missing_metadata)?);
+    }
     let mut ok = true;
     for item in order {
         match metadata.get(&item) {
@@ -2010,27 +2185,38 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
                 downloaded.get(&item).map(PathBuf::as_path),
                 true,
             ) {
-                Ok(lines) => log.extend(lines),
+                Ok(lines) => {
+                    progress_lines(&lines);
+                    log.extend(lines);
+                }
                 Err(error) => {
                     ok = false;
-                    log.push(format!("! {item}: {error}"));
+                    let line = format!("! {item}: {error}");
+                    progress_push(line.clone());
+                    log.push(line);
                 }
             },
             None => {
                 ok = false;
-                log.push(format!("! {item}: mod đã bị xoá hoặc đặt riêng tư"));
+                let line = format!("! {item}: mod đã bị xoá hoặc đặt riêng tư");
+                progress_push(line.clone());
+                log.push(line);
             }
         }
     }
     if let Err(error) = persist_resolutions(user, &resolutions) {
         ok = false;
-        log.push(format!("! không lưu được ánh xạ mod id ({error})"));
+        let line = format!("! không lưu được ánh xạ mod id ({error})");
+        progress_push(line.clone());
+        log.push(line);
     }
     let state = managed_state(user);
     let missing = missing_modids(&state, &user.join("mods"), &user.join("mods_off"));
     if !missing.is_empty() {
         ok = false;
-        log.push(format!("! thiếu mod bắt buộc: {}", missing.join(", ")));
+        let line = format!("! thiếu mod bắt buộc: {}", missing.join(", "));
+        progress_push(line.clone());
+        log.push(line);
     }
     if log.iter().any(|line| line.trim_start().starts_with('!')) {
         ok = false;
@@ -2118,12 +2304,14 @@ fn remove_internal(id: &str, user: &Path) -> Result<Done, String> {
             transaction.display()
         ));
     }
+    progress_lines(&log);
     Ok(Done { ok, log })
 }
 
 fn update_internal(user: &Path) -> Result<Done, String> {
     let state = managed_state(user);
     if state.is_empty() {
+        progress_push("không có mod để cập nhật");
         return Ok(Done {
             ok: true,
             log: vec!["không có mod để cập nhật".into()],
@@ -2139,21 +2327,28 @@ fn update_internal(user: &Path) -> Result<Done, String> {
         match metadata.get(&id) {
             None => {
                 ok = false;
-                log.push(format!(
-                    "! {title}: đã biến mất khỏi workshop, giữ nguyên bản cục bộ"
-                ));
+                let line = format!("! {title}: đã biến mất khỏi workshop, giữ nguyên bản cục bộ");
+                progress_push(line.clone());
+                log.push(line);
             }
             Some(detail)
                 if value_u64(detail, "time_updated") == value_u64(entry, "updated")
                     && entry_complete(entry, &user.join("mods"), &user.join("mods_off")) =>
             {
-                log.push(format!("= {title}"));
+                let line = format!("= {title}");
+                progress_push(line.clone());
+                log.push(line);
             }
             Some(detail) => match install_one(&id, detail, true, user) {
-                Ok(lines) => log.extend(lines),
+                Ok(lines) => {
+                    progress_lines(&lines);
+                    log.extend(lines);
+                }
                 Err(error) => {
                     ok = false;
-                    log.push(format!("! {title}: {error}"));
+                    let line = format!("! {title}: {error}");
+                    progress_push(line.clone());
+                    log.push(line);
                 }
             },
         }
@@ -2162,7 +2357,9 @@ fn update_internal(user: &Path) -> Result<Done, String> {
     let missing = missing_modids(&refreshed, &user.join("mods"), &user.join("mods_off"));
     if !missing.is_empty() {
         ok = false;
-        log.push(format!("! thiếu mod bắt buộc: {}", missing.join(", ")));
+        let line = format!("! thiếu mod bắt buộc: {}", missing.join(", "));
+        progress_push(line.clone());
+        log.push(line);
     }
     if log.iter().any(|line| line.trim_start().starts_with('!')) {
         ok = false;
@@ -2171,24 +2368,45 @@ fn update_internal(user: &Path) -> Result<Done, String> {
 }
 
 #[tauri::command]
-fn install(id: String, force: Option<bool>) -> Result<Done, String> {
-    let _guard = work_guard()?;
+async fn install(id: String, force: Option<bool>) -> Result<Done, String> {
     let (_, user, _, _) = paths();
-    install_internal(&id, force.unwrap_or(false), &user)
+    blocking_work(true, move || {
+        progress_push(format!("đang cài {id}"));
+        let result = install_internal(&id, force.unwrap_or(false), &user);
+        if let Err(error) = &result {
+            progress_push(format!("! {id}: {error}"));
+        }
+        result
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove(id: String) -> Result<Done, String> {
-    let _guard = work_guard()?;
+async fn remove(id: String) -> Result<Done, String> {
     let (_, user, _, _) = paths();
-    remove_internal(&id, &user)
+    blocking_work(true, move || {
+        progress_push(format!("đang gỡ {id}"));
+        let result = remove_internal(&id, &user);
+        if let Err(error) = &result {
+            progress_push(format!("! {id}: {error}"));
+        }
+        result
+    })
+    .await
 }
 
 #[tauri::command]
-fn update() -> Result<Done, String> {
-    let _guard = work_guard()?;
+async fn update() -> Result<Done, String> {
     let (_, user, _, _) = paths();
-    update_internal(&user)
+    blocking_work(true, move || {
+        progress_push("đang cập nhật tất cả");
+        let result = update_internal(&user);
+        if let Err(error) = &result {
+            progress_push(format!("! cập nhật thất bại: {error}"));
+        }
+        result
+    })
+    .await
 }
 
 fn installed_folders_rs(user: &Path) -> Result<Vec<(String, bool)>, String> {
@@ -2526,36 +2744,44 @@ fn bisect_stop_internal(user: &Path) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value, String> {
-    let _guard = work_guard()?;
+async fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value, String> {
     let (_, user, _, _) = paths();
-    match op.as_deref().unwrap_or("view") {
-        "view" | "" => bisect_view_internal(&user),
-        "start" => {
-            let state = bisect_start_internal(names, &user)?;
-            Ok(json!({ "ok": true, "state": state }))
+    let action = op.as_deref().unwrap_or("view").to_string();
+    let track = !matches!(action.as_str(), "view" | "");
+    blocking_work(track, move || {
+        if track {
+            progress_push(format!("bisect: {action}"));
         }
-        "bad" => {
-            let state = bisect_mark_internal(true, &user)?;
-            Ok(json!({ "ok": true, "state": state }))
+        let result = match action.as_str() {
+            "view" | "" => bisect_view_internal(&user),
+            "start" => bisect_start_internal(names, &user)
+                .map(|state| json!({ "ok": true, "state": state })),
+            "bad" => {
+                bisect_mark_internal(true, &user).map(|state| json!({ "ok": true, "state": state }))
+            }
+            "good" => bisect_mark_internal(false, &user)
+                .map(|state| json!({ "ok": true, "state": state })),
+            "stop" => bisect_stop_internal(&user)
+                .and_then(|_| bisect_view_internal(&user))
+                .map(|state| json!({ "ok": true, "state": state })),
+            other => Err(format!("Lệnh bisect không hợp lệ: {other}")),
+        };
+        if track {
+            match &result {
+                Ok(_) => progress_push(format!("bisect {action}: xong")),
+                Err(error) => progress_push(format!("! bisect {action}: {error}")),
+            }
         }
-        "good" => {
-            let state = bisect_mark_internal(false, &user)?;
-            Ok(json!({ "ok": true, "state": state }))
-        }
-        "stop" => {
-            bisect_stop_internal(&user)?;
-            let state = bisect_view_internal(&user)?;
-            Ok(json!({ "ok": true, "state": state }))
-        }
-        other => Err(format!("Lệnh bisect không hợp lệ: {other}")),
-    }
+        result
+    })
+    .await
 }
 
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            state, enable, disable, browse, detail, bisect, install, remove, update, prefetch
+            state, enable, disable, browse, detail, bisect, install, remove, update, prefetch,
+            progress
         ])
         .run(tauri::generate_context!())
         .expect("pzmod: tauri failed to start");
@@ -2600,6 +2826,23 @@ mod tests {
             Some("456")
         );
         assert_eq!(steamcmd_success_id("ERROR! Download item 456 failed"), None);
+    }
+
+    #[test]
+    fn progress_store_is_capped_and_incremental() {
+        let mut store = ProgressStore {
+            active: true,
+            ..ProgressStore::default()
+        };
+        for index in 0..505 {
+            store.push(format!("line {index}"));
+        }
+        let all = store.snapshot(0);
+        assert_eq!(all.seq, 505);
+        assert_eq!(all.lines.len(), PROGRESS_CAP);
+        assert_eq!(all.lines[0], "line 5");
+        assert!(all.active);
+        assert_eq!(store.snapshot(504).lines, ["line 504"]);
     }
 
     #[test]

@@ -80,6 +80,39 @@ BROWSE_GAP = 2.0
 _last_hit = [0.0]
 _hit_lock = threading.Lock()
 
+PROGRESS_CAP = 500
+_progress_lock = threading.Lock()
+_progress_lines = collections.deque(maxlen=PROGRESS_CAP)
+_progress_seq = [0]
+_progress_active = [False]
+
+
+def progress_push(line):
+    with _progress_lock:
+        _progress_seq[0] += 1
+        _progress_lines.append(str(line))
+
+
+def progress_snapshot(since=0):
+    with _progress_lock:
+        since = max(0, int(since or 0))
+        first = _progress_seq[0] - len(_progress_lines)
+        offset = min(len(_progress_lines), max(0, since - first))
+        return {"seq": _progress_seq[0], "lines": list(_progress_lines)[offset:],
+                "active": _progress_active[0]}
+
+
+@contextlib.contextmanager
+def progress_job():
+    with _progress_lock:
+        _progress_lines.clear()
+        _progress_active[0] = True
+    try:
+        yield
+    finally:
+        with _progress_lock:
+            _progress_active[0] = False
+
 RATE_LIMITED = ("Steam chặn vì hỏi quá nhiều - chờ 10-30 phút. "
                 "IP Warp là IP dùng chung nên dễ dính hơn IP nhà")
 
@@ -366,7 +399,7 @@ def _steamcmd_success_id(line):
     return line.split(marker, 1)[1].split(None, 1)[0]
 
 
-def download_many(wids, force=False):
+def download_many(wids, force=False, labels=None):
     """Download workshop items through one SteamCMD process."""
     if any(not wid.isdigit() for wid in wids):
         die("Workshop id không hợp lệ")
@@ -389,8 +422,12 @@ def download_many(wids, force=False):
         line = line.rstrip()
         completed_id = _steamcmd_success_id(line)
         if completed_id in wids:
+            fresh = completed_id not in completed
             completed.add(completed_id)
-            print("  . steamcmd tải xong %s" % completed_id)
+            if fresh:
+                print("steamcmd: tải xong %s" % completed_id)
+                title = (labels or {}).get(completed_id, completed_id)
+                print("tải xong %s (%d/%d)" % (title, len(completed), len(wids)))
         if line:
             tail.append(line)
     process.wait()
@@ -399,14 +436,16 @@ def download_many(wids, force=False):
         dest = os.path.join(root, "content", APPID, wid)
         if (wid in completed or os.path.isdir(dest)) and os.path.isdir(dest):
             downloaded[wid] = dest
+        else:
+            print("! %s: steamcmd không tải được mục này" % wid)
     if not downloaded and wids:
-        print("  ! steamcmd không tải được mục nào: %s" % " | ".join(tail))
+        print("! steamcmd không tải được mục nào: %s" % " | ".join(tail))
     return downloaded
 
 
-def download(wid, force=False):
+def download(wid, force=False, label=None):
     """Download one workshop item through SteamCMD and return its item folder."""
-    result = download_many([wid], force=force)
+    result = download_many([wid], force=force, labels={wid: label or wid})
     if wid not in result:
         die("steamcmd thất bại với %s" % wid)
     return result[wid]
@@ -447,7 +486,7 @@ def install_one(wid, detail=None, force=False, source=None, downloaded=False):
     if downloaded and source is None:
         print("  ! %s: steamcmd không tải được mục này" % wid)
         return False
-    source = source or download(wid, force=bool(previous) or force)
+    source = source or download(wid, force=bool(previous) or force, label=title)
     roots = _mod_roots(source)
     if not roots:
         print("  ! %s: không tìm thấy mods/<ModName>/mod.info" % title)
@@ -587,14 +626,17 @@ def _search_modid_candidates(modid):
 
 
 def _resolve_modid(modid, cache):
+    print("đang dò mod bắt buộc: %s" % modid)
     key = _require_id(modid).casefold()
     if key in cache:
         wid = cache[key]
         if wid is None:
+            print("không tìm thấy workshop id cho %s" % modid)
             return None
         sources = download_many([wid])
         try:
             if wid in sources and _source_provides_modid(sources[wid], modid):
+                print("đã tìm thấy %s (%s)" % (modid, wid))
                 return wid, sources[wid]
         except OSError:
             pass
@@ -604,6 +646,10 @@ def _resolve_modid(modid, cache):
     sources = download_many(candidates) if candidates else {}
     matched = _matching_candidate(modid, candidates, sources)
     cache[key] = matched
+    if matched:
+        print("đã tìm thấy %s (%s)" % (modid, matched))
+    else:
+        print("không tìm thấy workshop id cho %s" % modid)
     return (matched, sources[matched]) if matched else None
 
 
@@ -705,11 +751,16 @@ def cmd_install(args, force=False, deps=True):
             print("kèm %d mod bắt buộc: %s" % (len(extra), ", ".join(
                 names.get(wid, {}).get("title", wid) for wid in extra)))
     state = read_state()
-    sources = download_many(order, force=force or any(wid in state for wid in order))
+    metadata = details(order)
+    labels = {wid: metadata.get(wid, {}).get("title") or wid for wid in order}
+    sources = download_many(order, force=force or any(wid in state for wid in order),
+                            labels=labels)
     resolutions = _resolution_cache(state)
     if deps:
         order, resolutions = _expand_mod_dependencies(order, sources)
-    metadata = details(order)
+    missing_metadata = [wid for wid in order if wid not in metadata]
+    if missing_metadata:
+        metadata.update(details(missing_metadata))
     for wid in order:
         install_one(wid, metadata.get(wid), force=force,
                     source=sources.get(wid), downloaded=True)
@@ -1168,7 +1219,7 @@ def check_mod_transactions():
                 info_file.write("id=Test\n")
             with open(os.path.join(source, "mods", "Keep", "new.txt"), "w") as new_file:
                 new_file.write("new")
-            download = lambda wid, force=False: source
+            download = lambda wid, force=False, label=None: source
             detail = {"consumer_app_id": 108600, "title": "Test",
                       "time_updated": 2, "file_size": 2}
             output = io.StringIO()
@@ -1213,6 +1264,16 @@ def cmd_selftest(args):
     assert as_id(" 456 ") == "456"
     assert _steamcmd_success_id("Success. Downloaded item 456 to x") == "456"
     assert _steamcmd_success_id("ERROR! Download item 456 failed") is None
+    with progress_job():
+        start = _progress_seq[0]
+        for index in range(505):
+            progress_push("line %d" % index)
+        progress = progress_snapshot(0)
+        assert progress == {"seq": start + 505,
+                            "lines": ["line %d" % i for i in range(5, 505)],
+                            "active": True}
+        assert progress_snapshot(progress["seq"] - 1)["lines"] == ["line 504"]
+    assert progress_snapshot(progress["seq"])["active"] is False
     assert _resolution_cache({"1": {"resolved": {
         "Found": "22", "Unresolved": None}}}) == {
             "found": "22", "unresolved": None}

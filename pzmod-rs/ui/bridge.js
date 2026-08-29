@@ -17,6 +17,7 @@
     "/api/remove": "remove",
     "/api/update": "update",
     "/api/prefetch": "prefetch",
+    "/api/progress": "progress",
   };
 
   var NOT_YET = "Chức năng này chưa port sang bản Rust. Dùng pzmod-gui.bat (bản Python) cho tới khi xong.";
@@ -50,6 +51,8 @@
         args.page = Math.max(1, Number(args.page) || 1);
         args.tags = q ? q.getAll("tag") : [];
         delete args.tag;
+      } else if (cmd === "progress") {
+        args.since = Math.max(0, Number(args.since) || 0);
       }
     }
 

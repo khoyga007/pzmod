@@ -43,21 +43,53 @@ def bisect_mod():
         return None
 
 
-def capture(fn, *args):
+class ProgressBuffer(io.StringIO):
+    """Capture the final response while forwarding complete lines to polling clients."""
+
+    def __init__(self):
+        super().__init__()
+        self.pending = ""
+
+    def write(self, text):
+        written = super().write(text)
+        self.pending += text
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            line = line.rstrip("\r")
+            if line:
+                pzmod.progress_push(line)
+        return written
+
+    def finish(self):
+        line = self.pending.rstrip("\r")
+        if line:
+            pzmod.progress_push(line)
+        self.pending = ""
+
+
+def capture(fn, *args, progress_label=None):
     """Run a pzmod command, returning its printed lines. pzmod.die() raises SystemExit
     (bad id, steamcmd failure) - that must surface as a failed request, not kill the server."""
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf):
-            fn(*args)
-        lines = buf.getvalue().splitlines()
-        ok = not any(l.strip().startswith(("!", "ERROR")) for l in lines)
-        return {"ok": ok, "log": lines}
-    except SystemExit as e:
-        return {"ok": False, "log": buf.getvalue().splitlines(), "error": str(e) or "aborted"}
-    except Exception as e:
-        return {"ok": False, "log": buf.getvalue().splitlines(),
-                "error": "%s: %s" % (type(e).__name__, e)}
+    buf = ProgressBuffer()
+    with pzmod.progress_job():
+        if progress_label:
+            pzmod.progress_push(progress_label)
+        try:
+            with contextlib.redirect_stdout(buf):
+                fn(*args)
+            lines = buf.getvalue().splitlines()
+            ok = not any(l.strip().startswith(("!", "ERROR")) for l in lines)
+            return {"ok": ok, "log": lines}
+        except SystemExit as e:
+            return {"ok": False, "log": buf.getvalue().splitlines(),
+                    "error": str(e) or "aborted"}
+        except Exception as e:
+            error = "%s: %s" % (type(e).__name__, e)
+            buf.finish()
+            pzmod.progress_push("! " + error)
+            return {"ok": False, "log": buf.getvalue().splitlines(), "error": error}
+        finally:
+            buf.finish()
 
 
 def snapshot():
@@ -71,6 +103,7 @@ def snapshot():
                           "updated": entry.get("updated") or 0,
                           "modids": entry.get("modids", []),
                           "require": entry.get("require", []),
+                          "resolved": entry.get("resolved", {}),
                           "folders": folders,
                           "present": any(f["status"] in ("enabled", "disabled", "collision")
                                          for f in folders)}
@@ -249,6 +282,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.wfile.write(blob)
             if url.path == "/api/state":
                 return self.send(snapshot())
+            if url.path == "/api/progress":
+                try:
+                    since = max(0, int(one("since", "0") or 0))
+                except ValueError:
+                    return self.send({"error": "bad since"}, code=400)
+                return self.send(pzmod.progress_snapshot(since))
             if url.path == "/api/bisect":
                 return self.send(bisect_view())
             if url.path == "/api/browse":
@@ -280,7 +319,9 @@ class Handler(BaseHTTPRequestHandler):
             (module.enable if on else module.disable)(folder)
         except (ValueError, RuntimeError, OSError) as e:
             return self.send({"ok": False, "log": [], "error": str(e)})
-        return self.send({"ok": True, "log": ["%s %s" % ("bật" if on else "tắt", folder)]})
+        line = "%s %s" % ("bật" if on else "tắt", folder)
+        pzmod.progress_push(line)
+        return self.send({"ok": True, "log": [line]})
 
     def do_POST(self):
         url = urlparse(self.path)
@@ -296,11 +337,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({"error": "bad id"}, code=400)
             with _work:
                 if url.path == "/api/install":
-                    return self.send(capture(pzmod.cmd_install, [wid], bool(body.get("force"))))
+                    return self.send(capture(pzmod.cmd_install, [wid], bool(body.get("force")),
+                                             progress_label="đang cài " + wid))
                 if url.path == "/api/remove":
-                    return self.send(capture(pzmod.cmd_remove, [wid]))
+                    return self.send(capture(pzmod.cmd_remove, [wid],
+                                             progress_label="đang gỡ " + wid))
                 if url.path == "/api/update":
-                    return self.send(capture(pzmod.cmd_update, []))
+                    return self.send(capture(pzmod.cmd_update, [],
+                                             progress_label="đang cập nhật tất cả"))
                 if url.path == "/api/prefetch":
                     ids = body.get("ids") or []
                     if isinstance(ids, list):
@@ -315,20 +359,25 @@ class Handler(BaseHTTPRequestHandler):
                     if not module:
                         return self.send({"error": "thiếu pzbisect.py"}, code=500)
                     op = str(body.get("op") or "")
-                    try:
-                        if op == "start":
-                            module.bisect_start(body.get("names") or None)
-                        elif op == "bad":
-                            module.bisect_mark(True)
-                        elif op == "good":
-                            module.bisect_mark(False)
-                        elif op == "stop":
-                            module.bisect_stop()
-                        else:
-                            return self.send({"error": "bad op"}, code=400)
-                    except (ValueError, RuntimeError, OSError) as e:
-                        return self.send({"ok": False, "error": str(e), "state": bisect_view()})
-                    return self.send({"ok": True, "state": bisect_view()})
+                    with pzmod.progress_job():
+                        pzmod.progress_push("bisect: " + op)
+                        try:
+                            if op == "start":
+                                module.bisect_start(body.get("names") or None)
+                            elif op == "bad":
+                                module.bisect_mark(True)
+                            elif op == "good":
+                                module.bisect_mark(False)
+                            elif op == "stop":
+                                module.bisect_stop()
+                            else:
+                                return self.send({"error": "bad op"}, code=400)
+                        except (ValueError, RuntimeError, OSError) as e:
+                            pzmod.progress_push("! bisect %s: %s" % (op, e))
+                            return self.send({"ok": False, "error": str(e),
+                                              "state": bisect_view()})
+                        pzmod.progress_push("bisect %s: xong" % op)
+                        return self.send({"ok": True, "state": bisect_view()})
             self.send({"error": "not found"}, code=404)
         except Exception as e:
             self.send({"error": "%s: %s" % (type(e).__name__, e)}, code=500)
