@@ -1,0 +1,80 @@
+/* Hallmark · genre: atmospheric · macrostructure: Index-First · theme: Midnight
+ * enrichment: none (typography only) · nav: N13 inline search pill · footer: Ft4 dense colophon
+ * axes: paper-band=dark · display-style=mono · accent-hue=warm
+ * pre-emit critique: P5 H5 E4 S5 R4 V5
+ */
+
+:root {
+  /* Paper — dark, anchor hue 40 (warm grey). Never #000. */
+  --color-paper:     oklch(13.5% 0.008 40);
+  --color-paper-2:   oklch(17.5% 0.010 40);
+  --color-paper-3:   oklch(21.5% 0.011 40);
+  /* --color-rule bounds interactive controls, so it must clear 3:1 against every
+     surface a control can sit on - paper, the row-hover paper-2, and the button-hover
+     and toast paper-3. paper-3 is the binding one: 48% gave only 2.67 there.
+     --color-rule-soft only separates rows and may sit below it. */
+  --color-rule:      oklch(51%   0.010 40);
+  --color-rule-soft: oklch(26%   0.008 40);
+
+  /* Ink + neutrals — same anchor, tinted warm. Every tier clears 4.5:1 on paper,
+     including --color-faint, which carries placeholder and helper text. */
+  --color-ink:       oklch(94%   0.006 60);
+  --color-muted:     oklch(80%   0.007 45);
+  --color-neutral:   oklch(68%   0.008 40);
+  --color-faint:     oklch(60%   0.008 40);  /* clears 4.5:1 on paper-2 too (row hover, search pill) */
+
+  /* Accent — one warm signal. Chroma lowered + lightness lifted for dark mode. */
+  --color-accent:      oklch(72% 0.175 48);
+  --color-accent-dim:  oklch(50% 0.115 48);
+  --color-on-accent:   oklch(16% 0.012 45);
+  --color-focus:       oklch(78% 0.165 60);
+
+  /* Destructive — the only second chromatic hue. No green/red pairing anywhere. */
+  --color-danger:     oklch(64% 0.185 25);
+  --color-danger-dim: oklch(44% 0.110 25);
+
+  /* Type */
+  --font-display: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+  --font-mono:    var(--font-display);
+  --font-body:    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Noto Sans", sans-serif;
+
+  --text-2xs:  0.6875rem;
+  --text-xs:   0.75rem;
+  --text-sm:   0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg:   1.0625rem;
+  --text-xl:   1.375rem;
+
+  --weight-body: 350;  /* light-on-dark optical compensation */
+  --weight-mid:  450;
+  --weight-bold: 600;
+
+  /* Space — 4 pt scale (3xs is the half-step badges and pills need) */
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs:  0.5rem;
+  --space-sm:  0.75rem;
+  --space-md:  1rem;
+  --space-lg:  1.5rem;
+  --space-xl:  2rem;
+  --space-2xl: 3rem;
+
+  /* Line, radius, depth */
+  --rule-hair:  1px;
+  --radius-sm:  4px;
+  --radius-md:  6px;
+  --radius-pill: 999px;
+
+  --z-base: 0;
+  --z-raised: 10;
+  --z-sticky: 20;
+  --z-toast: 40;
+
+  /* Motion */
+  --dur-instant: 0ms;
+  --dur-short: 120ms;
+  --dur-med: 200ms;
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:     cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}

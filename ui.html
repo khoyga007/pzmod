@@ -1,0 +1,793 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ddmod — trình quản lý mod Darkest Dungeon</title>
+<link rel="stylesheet" href="/tokens.css">
+<style>
+/* Hallmark · macrostructure: Gallery-First · theme: Midnight (shared with fmod/dspmod)
+ * nav: N13 bar, search pill demoted right of the sort control — the grid is the entry
+ * point, typing is optional. footer: Ft4 dense colophon.
+ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { overflow-x: clip; margin: 0; }
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: var(--weight-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+::selection { background: var(--color-accent-dim); color: var(--color-ink); }
+
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.u-nums { font-variant-numeric: tabular-nums; }
+.u-hide { display: none !important; }
+
+/* ─── bar ────────────────────────────────────────────────────────── */
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm) var(--space-md);
+  padding: var(--space-sm) clamp(1rem, 3vw, 1.75rem);
+  background: var(--color-paper);
+  border-bottom: var(--rule-hair) solid var(--color-rule-soft);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-right: auto;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.03em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.brand__mark { width: 0.5rem; height: 0.5rem; background: var(--color-accent); border-radius: 1px; }
+.brand__sub { color: var(--color-faint); font-size: var(--text-xs); font-weight: var(--weight-body); }
+
+.seg {
+  display: flex;
+  padding: var(--space-3xs);
+  background: var(--color-paper-2);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+}
+
+.seg button {
+  padding: var(--space-2xs) var(--space-sm);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-pill);
+  color: var(--color-neutral);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur-short) var(--ease-out), background var(--dur-short) var(--ease-out);
+}
+
+.seg button:hover { color: var(--color-ink); }
+.seg button[aria-pressed="true"] { background: var(--color-accent); color: var(--color-on-accent); font-weight: var(--weight-mid); }
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  flex: 0 1 20rem;
+  padding: 0 var(--space-sm);
+  background: var(--color-paper-2);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  transition: border-color var(--dur-short) var(--ease-out);
+}
+
+/* The ring is an outline, never a border-width change — a border swap would shift layout. */
+.search:focus-within { border-color: var(--color-accent-dim); outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.search:focus-within :focus-visible { outline: none; }
+.search__icon { flex: none; color: var(--color-neutral); }
+
+.search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-xs) 0;
+  background: none;
+  border: 0;
+  color: var(--color-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  min-height: 2rem;
+}
+
+.search input::placeholder { color: var(--color-faint); }
+.search input:focus { outline: none; }
+
+/* ─── buttons ────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-sm);
+  min-height: 2rem;
+  background: var(--color-paper-2);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-short) var(--ease-out), border-color var(--dur-short) var(--ease-out);
+}
+
+.btn:hover:not(:disabled) { background: var(--color-paper-3); }
+.btn:disabled { opacity: 0.55; cursor: default; }
+.btn--accent { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); font-weight: var(--weight-mid); }
+.btn--accent:hover:not(:disabled) { background: var(--color-focus); border-color: var(--color-focus); }
+.btn--danger { color: var(--color-danger); border-color: var(--color-danger-dim); }
+.btn--danger:hover:not(:disabled) { background: var(--color-paper-3); }
+.btn--wide { width: 100%; }
+
+/* ─── chips ──────────────────────────────────────────────────────── */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  padding: var(--space-sm) clamp(1rem, 3vw, 1.75rem);
+  border-bottom: var(--rule-hair) solid var(--color-rule-soft);
+}
+
+.chip {
+  padding: var(--space-3xs) var(--space-xs);
+  background: none;
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  color: var(--color-neutral);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: color var(--dur-short) var(--ease-out), border-color var(--dur-short) var(--ease-out);
+}
+
+.chip:hover { color: var(--color-ink); }
+.chip[aria-pressed="true"] { border-color: var(--color-accent); color: var(--color-accent); }
+
+/* ─── grid ───────────────────────────────────────────────────────── */
+
+main { flex: 1 1 auto; padding: var(--space-lg) clamp(1rem, 3vw, 1.75rem) var(--space-2xl); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: var(--space-md);
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-paper-2);
+  border: var(--rule-hair) solid var(--color-rule-soft);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color var(--dur-short) var(--ease-out);
+}
+
+.card:hover { border-color: var(--color-rule); }
+.card[data-installed="1"] { border-color: var(--color-accent-dim); }
+.card[data-picked="1"] { border-color: var(--color-accent); }
+
+/* Nút đánh dấu phải nằm NGOÀI .card__shot: cái đó đã là <button>, lồng nút
+   trong nút thì bàn phím không tới được cái bên trong. */
+.card__pick {
+  position: absolute;
+  top: var(--space-2xs);
+  right: var(--space-2xs);
+  z-index: 2;
+  width: 1.75rem;
+  height: 1.75rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: var(--color-paper);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  color: transparent;
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+
+.card__pick:hover { opacity: 1; color: var(--color-neutral); }
+.card:hover .card__pick { opacity: 1; }
+.card__pick[aria-pressed="true"] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-on-accent);
+  opacity: 1;
+}
+.card[data-installed="1"] .card__pick { display: none; }
+
+/* ─── thanh gom ──────────────────────────────────────────────────── */
+
+.bulk {
+  position: fixed;
+  left: 50%;
+  bottom: var(--space-lg);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  transform: translateX(-50%);
+  max-width: calc(100vw - 2rem);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--color-paper-3);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0.5rem 1.5rem oklch(0% 0 0 / 0.45);
+}
+
+.bulk[hidden] { display: none; }
+.bulk__count { color: var(--color-ink); font-family: var(--font-display); font-size: var(--text-xs); white-space: nowrap; }
+body:has(.bulk:not([hidden])) main { padding-bottom: 6rem; }
+
+.card__shot {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  background: var(--color-paper-3);
+  border: 0;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.card__shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.card__shot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--color-paper);
+  opacity: 0;
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+
+.card__shot:hover::after { opacity: 0.18; }
+
+.card__flag {
+  position: absolute;
+  top: var(--space-2xs);
+  left: var(--space-2xs);
+  z-index: 1;
+  padding: var(--space-3xs) var(--space-2xs);
+  background: var(--color-accent);
+  border-radius: var(--radius-sm);
+  color: var(--color-on-accent);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.04em;
+}
+
+.card__body { display: flex; flex-direction: column; gap: var(--space-2xs); flex: 1 1 auto; padding: var(--space-sm); }
+
+.card__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-mid);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.card__meta { display: flex; gap: var(--space-xs); color: var(--color-faint); font-family: var(--font-display); font-size: var(--text-2xs); }
+.card__tags { color: var(--color-neutral); font-size: var(--text-2xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card__act { margin-top: auto; padding-top: var(--space-2xs); display: flex; gap: var(--space-2xs); }
+.card__act .btn { flex: 1 1 auto; }
+
+.empty { padding: var(--space-2xl) 0; color: var(--color-faint); text-align: center; font-family: var(--font-display); font-size: var(--text-sm); }
+
+.more { display: flex; justify-content: center; padding-top: var(--space-xl); }
+
+/* ─── installed table ────────────────────────────────────────────── */
+
+.rows { display: flex; flex-direction: column; border: var(--rule-hair) solid var(--color-rule-soft); border-radius: var(--radius-md); overflow: hidden; }
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: var(--rule-hair) solid var(--color-rule-soft);
+}
+
+.row:last-child { border-bottom: 0; }
+.row:hover { background: var(--color-paper-2); }
+.row__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
+.row__dim { color: var(--color-faint); font-family: var(--font-display); font-size: var(--text-xs); }
+.row__warn { color: var(--color-danger); font-family: var(--font-display); font-size: var(--text-xs); }
+
+/* ─── dialog ─────────────────────────────────────────────────────── */
+
+dialog {
+  width: min(46rem, 92vw);
+  max-height: 88vh;
+  padding: 0;
+  background: var(--color-paper-2);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-md);
+  color: var(--color-ink);
+}
+
+dialog::backdrop { background: oklch(0% 0 0 / 0.65); }
+
+.sheet { display: flex; flex-direction: column; max-height: 88vh; }
+.sheet__shot { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--color-paper-3); }
+.sheet__body { padding: var(--space-md); overflow-y: auto; }
+.sheet__title { margin: 0 0 var(--space-2xs); font-size: var(--text-xl); font-weight: var(--weight-bold); line-height: 1.2; }
+.sheet__meta { margin: 0 0 var(--space-md); color: var(--color-faint); font-family: var(--font-display); font-size: var(--text-xs); }
+.sheet__desc { margin: 0; white-space: pre-wrap; color: var(--color-muted); font-size: var(--text-sm); }
+.sheet__foot { display: flex; gap: var(--space-xs); padding: var(--space-sm) var(--space-md); border-top: var(--rule-hair) solid var(--color-rule-soft); }
+.sheet__foot .btn:first-child { margin-right: auto; }
+
+/* ─── log toast ──────────────────────────────────────────────────── */
+
+.log {
+  position: fixed;
+  right: var(--space-md);
+  bottom: var(--space-md);
+  z-index: var(--z-toast);
+  width: min(28rem, calc(100vw - 2rem));
+  max-height: 40vh;
+  padding: var(--space-sm);
+  background: var(--color-paper-3);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-md);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.log__line--bad { color: var(--color-danger); }
+.log__close { position: sticky; top: 0; float: right; }
+
+/* ─── footer ─────────────────────────────────────────────────────── */
+
+footer {
+  padding: var(--space-md) clamp(1rem, 3vw, 1.75rem);
+  border-top: var(--rule-hair) solid var(--color-rule-soft);
+  color: var(--color-faint);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  line-height: 1.7;
+}
+
+.spin { display: inline-block; width: 0.7em; height: 0.7em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand"><span class="brand__mark"></span>ddmod<span class="brand__sub" id="brandSub"></span></div>
+
+  <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
+
+  <label class="search">
+    <svg class="search__icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <input id="q" type="search" placeholder="lọc thêm cho gọn (không bắt buộc)" autocomplete="off">
+  </label>
+
+  <button class="btn" id="tabBrowse" aria-pressed="true">Workshop</button>
+  <button class="btn" id="tabHave" aria-pressed="false">Đã cài <span id="haveCount" class="u-nums"></span></button>
+</header>
+
+<div class="chips" id="chips"></div>
+
+<main>
+  <section id="viewBrowse">
+    <div class="grid" id="grid"></div>
+    <p class="empty" id="empty" hidden>Không có mod nào khớp.</p>
+    <div class="more"><button class="btn" id="more">Tải thêm</button></div>
+  </section>
+
+  <section id="viewHave" hidden>
+    <div style="display:flex;gap:var(--space-xs);margin-bottom:var(--space-md)">
+      <button class="btn btn--accent" id="updateAll">Cập nhật hết</button>
+    </div>
+    <div class="rows" id="rows"></div>
+    <p class="empty" id="haveEmpty" hidden>Chưa cài mod nào qua ddmod.</p>
+  </section>
+</main>
+
+<div class="bulk" id="bulk" hidden>
+  <span class="bulk__count" id="bulkCount"></span>
+  <button class="btn" id="pickPage">Chọn hết</button>
+  <button class="btn" id="pickNone">Bỏ chọn</button>
+  <button class="btn btn--accent" id="bulkGo">Cài</button>
+</div>
+
+<footer id="foot"></footer>
+
+<dialog id="sheet"><div class="sheet">
+  <img class="sheet__shot" id="sheetShot" alt="">
+  <div class="sheet__body">
+    <h2 class="sheet__title" id="sheetTitle"></h2>
+    <p class="sheet__meta u-nums" id="sheetMeta"></p>
+    <p class="sheet__desc" id="sheetDesc"></p>
+  </div>
+  <div class="sheet__foot">
+    <button class="btn" id="sheetClose">Đóng</button>
+    <a class="btn" id="sheetLink" target="_blank" rel="noopener">Mở trên Steam</a>
+    <button class="btn btn--accent" id="sheetInstall">Cài</button>
+  </div>
+</div></dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { installed: {}, sorts: {}, tags: [], sort: "trend", tag: "", q: "", page: 1, busy: false,
+  picked: new Map(),   // id -> {title,size}, sống qua mọi lần đổi tag/trang
+  seen: new Map() };   // id -> item, để thanh gom biết tên và dung lượng
+
+const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
+const NUM = (n) => (n || 0).toLocaleString("vi-VN");
+const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  } : undefined);
+  const data = await r.json();
+  if (data.error && !data.log) throw new Error(data.error);
+  return data;
+}
+
+/* ── log toast ────────────────────────────────────────────────── */
+function showLog(res) {
+  let box = $("logBox");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "logBox";
+    box.className = "log";
+    box.setAttribute("role", "status");
+    document.body.appendChild(box);
+  }
+  const lines = (res.log || []).concat(res.error ? ["ERROR: " + res.error] : []);
+  box.innerHTML = '<button class="btn log__close" onclick="this.parentNode.remove()">×</button>' +
+    lines.map((l) => `<div class="log__line${/^\s*(!|ERROR)/.test(l) ? " log__line--bad" : ""}">${esc(l)}</div>`).join("");
+  if (res.ok) setTimeout(() => box.remove(), 6000);
+}
+
+/* ── rendering ────────────────────────────────────────────────── */
+function actions(it) {
+  const has = state.installed[it.id];
+  return has
+    ? `<button class="btn" data-act="update" data-id="${it.id}">Cập nhật</button>
+       <button class="btn btn--danger" data-act="remove" data-id="${it.id}">Gỡ</button>`
+    : `<button class="btn btn--accent btn--wide" data-act="install" data-id="${it.id}">Cài</button>`;
+}
+
+function cardHTML(it) {
+  const has = state.installed[it.id] ? "1" : "0";
+  const shot = it.preview
+    ? `<img src="${esc(it.preview)}" alt="" loading="lazy">`
+    : "";
+  state.seen.set(it.id, it);
+  const pick = state.picked.has(it.id) ? "true" : "false";
+  return `<article class="card" data-installed="${has}" data-picked="${pick === "true" ? 1 : 0}" data-id="${it.id}">
+    <button class="card__pick" data-act="pick" data-id="${it.id}" aria-pressed="${pick}"
+            title="Đánh dấu để cài hàng loạt" aria-label="Đánh dấu ${esc(it.title)}">✓</button>
+    <button class="card__shot" data-act="open" data-id="${it.id}" title="${esc(it.title)}">
+      ${has === "1" ? '<span class="card__flag">ĐÃ CÀI</span>' : ""}${shot}
+    </button>
+    <div class="card__body">
+      <h3 class="card__title">${esc(it.title)}</h3>
+      <div class="card__meta u-nums"><span>${NUM(it.subs)} sub</span><span>${KB(it.size)}</span></div>
+      <div class="card__tags">${esc(it.tags.slice(0, 3).join(" · ")) || "&nbsp;"}</div>
+      <div class="card__act">${actions(it)}</div>
+    </div>
+  </article>`;
+}
+
+// steamcommunity.com bans an IP that scrapes too eagerly, and the ban hits the Steam
+// client too — so a listing already fetched this session is never fetched again.
+const pageCache = new Map();
+
+async function load(reset) {
+  if (state.busy) return;
+  state.busy = true;
+  $("more").disabled = true;
+  $("more").innerHTML = '<span class="spin"></span> đang tải';
+  if (reset) { state.page = 1; $("grid").innerHTML = ""; }
+  try {
+    const p = new URLSearchParams({ sort: state.sort, page: state.page, q: state.q });
+    if (state.tag) p.append("tag", state.tag);
+    const key = p.toString();
+    if (!pageCache.has(key)) pageCache.set(key, (await api("/api/browse?" + p)).items);
+    const items = pageCache.get(key);
+    $("grid").insertAdjacentHTML("beforeend", items.map(cardHTML).join(""));
+    $("empty").hidden = $("grid").children.length > 0;
+    $("more").hidden = items.length === 0;
+    state.page++;
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+  } finally {
+    state.busy = false;
+    $("more").disabled = false;
+    $("more").textContent = "Tải thêm";
+  }
+}
+
+// Quét mọi thẻ chứ không riêng thẻ vừa bấm: một lượt cài có thể kéo theo mod
+// bắt buộc, và thẻ của mấy mod đó cũng đang nằm trên lưới.
+function refreshCards() {
+  document.querySelectorAll(".card").forEach((card) => {
+    const id = card.dataset.id;
+    const has = !!state.installed[id];
+    card.dataset.installed = has ? "1" : "0";
+    card.querySelector(".card__act").innerHTML = actions({ id });
+    if (has) { state.picked.delete(id); card.dataset.picked = "0"; }
+    const btn = card.querySelector(".card__pick");
+    if (btn) btn.setAttribute("aria-pressed", state.picked.has(id) ? "true" : "false");
+    const flag = card.querySelector(".card__flag");
+    if (has && !flag) card.querySelector(".card__shot").insertAdjacentHTML("afterbegin", '<span class="card__flag">ĐÃ CÀI</span>');
+    if (!has && flag) flag.remove();
+  });
+  renderBulk();   // quét trên có thể đã bỏ tick mấy mod vừa cài kèm
+}
+
+function renderHave() {
+  const list = Object.entries(state.installed).sort((a, b) => a[1].title.localeCompare(b[1].title));
+  $("haveCount").textContent = list.length ? `(${list.length})` : "";
+  $("haveEmpty").hidden = list.length > 0;
+  $("rows").innerHTML = list.map(([id, e]) => `<div class="row">
+    <div class="row__name" title="${esc(e.folder)}">${esc(e.title)}</div>
+    <div class="${e.present ? "row__dim" : "row__warn"}">${e.present ? KB(e.size || 0) : "thiếu thư mục"}</div>
+    <button class="btn" data-act="open" data-id="${id}">Xem</button>
+    <button class="btn btn--danger" data-act="remove" data-id="${id}">Gỡ</button>
+  </div>`).join("");
+}
+
+async function refreshState() {
+  const s = await api("/api/state");
+  Object.assign(state, { installed: s.installed, sorts: s.sorts, tags: s.tags });
+  $("brandSub").textContent = "· Darkest Dungeon";
+  $("foot").textContent = `game ${s.game}   ·   mods ${s.mods}   ·   ${Object.keys(s.installed).length} mod do ddmod quản lý`
+    + "\nbật/tắt mod vẫn làm trong màn hình Mods của game";
+  renderHave();
+}
+
+/* ── detail sheet ─────────────────────────────────────────────── */
+async function openSheet(id) {
+  const dlg = $("sheet");
+  $("sheetTitle").textContent = "đang tải…";
+  $("sheetDesc").textContent = "";
+  $("sheetMeta").textContent = "";
+  $("sheetShot").removeAttribute("src");
+  $("sheetLink").href = "https://steamcommunity.com/sharedfiles/filedetails/?id=" + id;
+  dlg.showModal();
+  const d = await api("/api/detail?id=" + id);
+  $("sheetTitle").textContent = d.title;
+  if (d.preview) $("sheetShot").src = d.preview;
+  const bits = [NUM(d.subs) + " sub", NUM(d.favorited) + " fav", KB(d.size),
+    "cập nhật " + new Date(d.updated * 1000).toLocaleDateString("vi-VN"),
+    d.tags.join(" · ")];
+  if (d.children) bits.unshift(`COLLECTION — ${d.children} mod con`);
+  if (d.folder) bits.unshift("đã cài: mods\\" + d.folder);
+  $("sheetMeta").textContent = bits.filter(Boolean).join("   ·   ");
+  $("sheetDesc").textContent = d.description || "(không có mô tả)";
+  const btn = $("sheetInstall");
+  btn.textContent = state.installed[id] ? "Cài lại" : (d.children ? `Cài cả ${d.children} mod` : "Cài");
+  btn.dataset.id = id;
+}
+
+/* ── đánh dấu hàng loạt ───────────────────────────────────────── */
+function renderBulk() {
+  const n = state.picked.size;
+  $("bulk").hidden = n === 0;
+  if (!n) return;
+  let bytes = 0;
+  state.picked.forEach((m) => { bytes += m.size || 0; });
+  $("bulkCount").textContent = `đã chọn ${n} mod · ${KB(bytes)}`;
+  $("bulkGo").textContent = `Cài ${n} mod`;
+}
+
+function togglePick(id, btn) {
+  if (state.installed[id]) return;          // cài rồi thì không có gì để gom
+  if (state.picked.has(id)) state.picked.delete(id);
+  else state.picked.set(id, state.seen.get(id) || { title: id, size: 0 });
+  const on = state.picked.has(id);
+  if (btn) btn.setAttribute("aria-pressed", on ? "true" : "false");
+  const card = btn && btn.closest(".card");
+  if (card) card.dataset.picked = on ? "1" : "0";
+  renderBulk();
+}
+
+async function bulkInstall() {
+  // Tuần tự: steamcmd chỉ có một kho cache, hai lượt tải cùng lúc là giẫm chân
+  // nhau — server cũng khoá lại, nên bắn song song chỉ được xếp hàng mà mất
+  // đường báo tiến độ.
+  const jobs = [...state.picked.keys()];
+  const bar = [$("bulkGo"), $("pickPage"), $("pickNone")];
+  bar.forEach((b) => { b.disabled = true; });
+  const log = [];
+  let done = 0, failed = 0;
+  for (const id of jobs) {
+    const name = (state.picked.get(id) || {}).title || id;
+    $("bulkGo").textContent = `Đang cài ${done + 1}/${jobs.length}…`;
+    log.push(`=== ${name}`);
+    try {
+      const res = await api("/api/install", { id });
+      log.push(...(res.log || []));
+      if (res.ok) {
+        state.picked.delete(id);            // hỏng thì giữ lại để bấm thử lần nữa
+      } else {
+        failed++;
+        if (res.error) log.push("ERROR: " + res.error);
+      }
+    } catch (e) {
+      failed++;
+      log.push("ERROR: " + e.message);
+    }
+    done++;
+    await refreshState();
+    refreshCards();
+  }
+  log.push(`--- xong ${jobs.length - failed}/${jobs.length}` + (failed ? `, hỏng ${failed} (vẫn còn đánh dấu)` : ""));
+  showLog({ ok: failed === 0, log });
+  bar.forEach((b) => { b.disabled = false; });
+  renderBulk();
+}
+
+$("bulkGo").addEventListener("click", bulkInstall);
+$("pickNone").addEventListener("click", () => {
+  state.picked.clear();
+  document.querySelectorAll(".card__pick").forEach((b) => {
+    b.setAttribute("aria-pressed", "false");
+    b.closest(".card").dataset.picked = "0";
+  });
+  renderBulk();
+});
+$("pickPage").addEventListener("click", () => {
+  document.querySelectorAll('.card[data-installed="0"]').forEach((card) => {
+    if (!state.picked.has(card.dataset.id)) togglePick(card.dataset.id, card.querySelector(".card__pick"));
+  });
+});
+
+/* ── actions ──────────────────────────────────────────────────── */
+async function act(kind, id, btn) {
+  const label = btn ? btn.innerHTML : "";
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>'; }
+  try {
+    const res = kind === "remove"
+      ? await api("/api/remove", { id })
+      : await api("/api/install", { id, force: kind === "update" });
+    showLog(res);
+    await refreshState();
+    refreshCards();
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+  }
+}
+
+document.addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-act]");
+  if (!el) return;
+  const { act: kind, id } = el.dataset;
+  if (kind === "open") return openSheet(id);
+  if (kind === "pick") return togglePick(id, el);
+  act(kind, id, el);
+});
+
+$("sheetInstall").addEventListener("click", (ev) => {
+  const id = ev.currentTarget.dataset.id;
+  act(state.installed[id] ? "update" : "install", id, ev.currentTarget).then(() => openSheet(id));
+});
+$("sheetClose").addEventListener("click", () => $("sheet").close());
+
+$("more").addEventListener("click", () => load(false));
+
+$("updateAll").addEventListener("click", async (ev) => {
+  ev.currentTarget.disabled = true;
+  try {
+    showLog(await api("/api/update", {}));
+    await refreshState();
+  } finally { ev.currentTarget.disabled = false; }
+});
+
+let typing;
+$("q").addEventListener("input", (ev) => {
+  state.q = ev.target.value.trim();
+  clearTimeout(typing);
+  typing = setTimeout(() => load(true), 700);
+});
+
+function setTab(browse) {
+  $("viewBrowse").hidden = !browse;
+  $("viewHave").hidden = browse;
+  $("chips").hidden = !browse;
+  $("tabBrowse").setAttribute("aria-pressed", String(browse));
+  $("tabHave").setAttribute("aria-pressed", String(!browse));
+}
+$("tabBrowse").addEventListener("click", () => setTab(true));
+$("tabHave").addEventListener("click", () => { renderHave(); setTab(false); });
+
+/* ── boot ─────────────────────────────────────────────────────── */
+(async () => {
+  await refreshState();
+
+  $("sortSeg").innerHTML = Object.entries(state.sorts)
+    .filter(([k]) => k !== "textsearch")
+    .map(([k, label], i) => `<button data-sort="${k}" aria-pressed="${i === 0}">${esc(label)}</button>`).join("");
+  $("sortSeg").addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-sort]");
+    if (!b) return;
+    state.sort = b.dataset.sort;
+    $("sortSeg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    load(true);
+  });
+
+  $("chips").innerHTML = [["", "Tất cả"]].concat(state.tags.map((t) => [t, t]))
+    .map(([v, label], i) => `<button class="chip" data-tag="${esc(v)}" aria-pressed="${i === 0}">${esc(label)}</button>`).join("");
+  $("chips").addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-tag]");
+    if (!b) return;
+    state.tag = b.dataset.tag;
+    $("chips").querySelectorAll(".chip").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    load(true);
+  });
+
+  // Grid first: the workshop is already on screen before anyone types anything.
+  load(true);
+})();
+</script>
+</body>
+</html>
