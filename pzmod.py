@@ -33,7 +33,42 @@ import urllib.request
 
 APPID = "108600"
 GAME = os.environ.get("PZ_GAME", r"D:\ProjectZomboid")
-USER = os.environ.get("PZ_USER", os.path.join(os.path.expanduser("~"), "Zomboid"))
+
+
+def _pz_user_rank(path):
+    """2 = game da ghi vao day, 1 = chi co mods/ khong rong, 0 = khong phai.
+
+    ensure_dirs() tao mods/ + mods_off/ rong, nen mot mods/ rong khong duoc tinh
+    diem — neu khong pzmod se cu chon lai cai thu muc do chinh no bia ra.
+    """
+    if (os.path.isfile(os.path.join(path, "options.ini"))
+            or os.path.isfile(os.path.join(path, "console.txt"))
+            or os.path.isdir(os.path.join(path, "Saves"))):
+        return 2
+    try:
+        return 1 if os.listdir(os.path.join(path, "mods")) else 0
+    except OSError:
+        return 0
+
+
+def _detect_user():
+    """Thu muc nguoi dung cua PZ khi khong ai dat PZ_USER (ban cai dat khong co
+    pz-paths.bat). Ban khong phai Steam doi cho bang -cachedir nen phai quet o."""
+    candidates = [os.path.join(os.path.expanduser("~"), "Zomboid")]
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = letter + ":\\"
+        if not os.path.isdir(root):
+            continue
+        candidates.append(os.path.join(root, "ProjectZomboid", "Zomboid"))
+        candidates.append(os.path.join(root, "Zomboid"))
+    for want in (2, 1):
+        for path in candidates:
+            if _pz_user_rank(path) == want:
+                return path
+    return candidates[0]
+
+
+USER = os.environ.get("PZ_USER") or _detect_user()
 MODS = os.path.join(USER, "mods")
 OFF = os.path.join(USER, "mods_off")
 STATE = os.path.join(USER, ".pzmod.json")

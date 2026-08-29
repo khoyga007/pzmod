@@ -102,14 +102,69 @@ fn env_path(key: &str) -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
+/// How strongly a folder looks like THE folder the game itself reads.
+/// 2 = the game wrote there (options.ini/console.txt/Saves are game-authored and
+/// pzmod never creates them). 1 = only a non-empty mods/ folder, which is what a
+/// pzmod-managed -cachedir tree looks like before the game has ever run in it.
+/// 0 = no. ensure_dirs() creates empty mods/ + mods_off/, so an empty mods/ must
+/// never score, or pzmod would keep re-electing a folder it made up itself.
+fn pz_user_rank(dir: &Path) -> u8 {
+    if dir.join("options.ini").is_file()
+        || dir.join("console.txt").is_file()
+        || dir.join("Saves").is_dir()
+    {
+        return 2;
+    }
+    let has_mods = fs::read_dir(dir.join("mods"))
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    u8::from(has_mods)
+}
+
+/// dev.bat sources pz-paths.bat, so PZ_USER is always set while developing. An
+/// installed build launched from the Start Menu has no such wrapper, and the old
+/// %USERPROFILE%\Zomboid fallback then pointed at a folder the game never uses:
+/// ensure_dirs() created mods/ and mods_off/ there and the app reported "no mods
+/// installed" while the real ones sat under a -cachedir path on another drive.
+/// So sweep the drives before falling back.
+fn detect_user_dir() -> Option<PathBuf> {
+    static DETECTED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DETECTED
+        .get_or_init(|| {
+            let mut candidates = Vec::new();
+            if let Some(home) = env_path("USERPROFILE") {
+                candidates.push(home.join("Zomboid"));
+            }
+            for letter in 'A'..='Z' {
+                let root = PathBuf::from(format!("{letter}:\\"));
+                if !root.is_dir() {
+                    continue;
+                }
+                candidates.push(root.join("ProjectZomboid").join("Zomboid"));
+                candidates.push(root.join("Zomboid"));
+            }
+            // Rank 2 everywhere before settling for a rank 1, and inside a rank
+            // keep candidate order (max_by_key would hand back the LAST match).
+            [2u8, 1].into_iter().find_map(|want| {
+                candidates
+                    .iter()
+                    .find(|dir| pz_user_rank(dir) == want)
+                    .cloned()
+            })
+        })
+        .clone()
+}
+
 /// (game, user, mods, mods_off) — same env overrides as pzmod.py so both halves
 /// of the port can be pointed at the throwaway tree in E:\pztest.
 fn paths() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let game = env_path("PZ_GAME").unwrap_or_else(|| PathBuf::from(r"D:\ProjectZomboid"));
-    let user = env_path("PZ_USER").unwrap_or_else(|| {
-        let home = env_path("USERPROFILE").unwrap_or_else(|| PathBuf::from(r"C:\"));
-        home.join("Zomboid")
-    });
+    let user = env_path("PZ_USER")
+        .or_else(detect_user_dir)
+        .unwrap_or_else(|| {
+            let home = env_path("USERPROFILE").unwrap_or_else(|| PathBuf::from(r"C:\"));
+            home.join("Zomboid")
+        });
     let mods = user.join("mods");
     let off = user.join("mods_off");
     (game, user, mods, off)
@@ -2831,6 +2886,26 @@ mod tests {
             Some("456")
         );
         assert_eq!(steamcmd_success_id("ERROR! Download item 456 failed"), None);
+    }
+
+    #[test]
+    fn pz_user_rank_prefers_the_folder_the_game_wrote() {
+        let root = test_root("user-rank");
+        let game_written = root.join("real");
+        let managed = root.join("cachedir");
+        let fresh = root.join("made-up");
+        fs::create_dir_all(game_written.join("mods")).unwrap();
+        fs::write(game_written.join("options.ini"), "x").unwrap();
+        fs::create_dir_all(managed.join("mods").join("SomeMod")).unwrap();
+        // What ensure_dirs() leaves behind: mods/ and mods_off/, both empty.
+        fs::create_dir_all(fresh.join("mods")).unwrap();
+        fs::create_dir_all(fresh.join("mods_off")).unwrap();
+
+        assert_eq!(pz_user_rank(&game_written), 2);
+        assert_eq!(pz_user_rank(&managed), 1);
+        assert_eq!(pz_user_rank(&fresh), 0);
+        assert_eq!(pz_user_rank(&root.join("nope")), 0);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
