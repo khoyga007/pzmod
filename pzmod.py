@@ -309,6 +309,56 @@ def _mod_metadata(roots):
     return modids, required
 
 
+def _source_metadata(source):
+    return _mod_metadata(_mod_roots(source))
+
+
+def _source_provides_modid(source, wanted):
+    return any(modid == wanted for modid in _source_metadata(source)[0])
+
+
+def _matching_candidate(wanted, candidates, sources):
+    for wid in candidates[:3]:
+        try:
+            if wid in sources and _source_provides_modid(sources[wid], wanted):
+                return wid
+        except OSError:
+            pass
+    return None
+
+
+def _resolution_cache(state=None):
+    state = read_state() if state is None else state
+    cache = {}
+    for entry in state.values():
+        if not isinstance(entry, dict):
+            continue
+        for modid, wid in entry.get("resolved", {}).items():
+            key = _require_id(modid).casefold()
+            if key and (wid is None or str(wid).isdigit()):
+                if wid is not None or key not in cache:
+                    cache[key] = None if wid is None else str(wid)
+    return cache
+
+
+def _persist_resolutions(cache):
+    state = read_state()
+    changed = False
+    for entry in state.values():
+        if not isinstance(entry, dict):
+            continue
+        resolved = {}
+        for modid in entry.get("require", []):
+            key = _require_id(modid).casefold()
+            if key in cache:
+                resolved[modid] = cache[key]
+        if entry.get("resolved") != resolved:
+            entry["resolved"] = resolved
+            changed = True
+    if changed:
+        write_state(state)
+
+
 def _steamcmd_success_id(line):
     marker = "Success. Downloaded item "
     if marker not in line:
@@ -482,6 +532,7 @@ def install_one(wid, detail=None, force=False, source=None, downloaded=False):
             "folders": [folder for folder, _, _ in roots],
             "modids": modids,
             "require": required,
+            "resolved": previous.get("resolved", {}),
         }
         write_state(state)
     except Exception as error:
@@ -527,6 +578,110 @@ def with_deps(ids, depth=4):
     return order
 
 
+def _search_modid_candidates(modid):
+    spaced = modid.replace("_", " ")
+    candidates = browse(spaced)[:3]
+    if not candidates and spaced != modid:
+        candidates = browse(modid)[:3]
+    return candidates
+
+
+def _resolve_modid(modid, cache):
+    key = _require_id(modid).casefold()
+    if key in cache:
+        wid = cache[key]
+        if wid is None:
+            return None
+        sources = download_many([wid])
+        try:
+            if wid in sources and _source_provides_modid(sources[wid], modid):
+                return wid, sources[wid]
+        except OSError:
+            pass
+        del cache[key]
+
+    candidates = _search_modid_candidates(modid)
+    sources = download_many(candidates) if candidates else {}
+    matched = _matching_candidate(modid, candidates, sources)
+    cache[key] = matched
+    return (matched, sources[matched]) if matched else None
+
+
+def _index_sources(sources, providers):
+    for wid, source in sources.items():
+        try:
+            for modid in _source_metadata(source)[0]:
+                providers.setdefault(modid.casefold(), wid)
+        except OSError:
+            pass
+
+
+def _installed_providers(state):
+    providers = {}
+    for wid, entry in state.items():
+        if not isinstance(entry, dict):
+            continue
+        if _entry_complete(entry):
+            for modid in entry.get("modids", []):
+                providers.setdefault(modid.casefold(), wid)
+    return providers
+
+
+def _expand_mod_dependencies(initial, sources, depth=4, state=None):
+    state = read_state() if state is None else state
+    cache = _resolution_cache(state)
+    providers = _installed_providers(state)
+    _index_sources(sources, providers)
+    order, seen = [], set()
+
+    def walk(wid, left):
+        if wid in seen:
+            return
+        seen.add(wid)
+        try:
+            required = _source_metadata(sources[wid])[1] if wid in sources else []
+        except OSError as error:
+            print("  ! %s: không đọc được mod.info (%s)" % (wid, error))
+            required = []
+        for modid in required:
+            provider = providers.get(modid.casefold())
+            if provider:
+                cache[modid.casefold()] = provider
+                if provider in sources:
+                    walk(provider, max(left - 1, 0))
+                continue
+            if left == 0:
+                continue
+            try:
+                resolved = _resolve_modid(modid, cache)
+            except (Blocked, OSError) as error:
+                print("  ! %s: không dò được workshop id (%s)" % (modid, error))
+                continue
+            if not resolved:
+                continue
+            provider, source = resolved
+            sources[provider] = source
+            _index_sources(sources, providers)
+            try:
+                title = details([provider]).get(provider, {}).get("title") or provider
+            except Exception:
+                title = provider
+            print("kèm mod bắt buộc: %s (%s)" % (title, provider))
+
+            workshop_order = with_deps([provider], left - 1)
+            needed = [item for item in workshop_order if item not in sources]
+            if needed:
+                sources.update(download_many(needed))
+                _index_sources(sources, providers)
+            for item in workshop_order:
+                walk(item, left - 1)
+        order.append(wid)
+
+    for wid in initial:
+        walk(wid, depth)
+    return order, cache
+
+
 def cmd_install(args, force=False, deps=True):
     if not args:
         die("install cần workshop id hoặc URL")
@@ -549,12 +704,16 @@ def cmd_install(args, force=False, deps=True):
             names = details(extra)
             print("kèm %d mod bắt buộc: %s" % (len(extra), ", ".join(
                 names.get(wid, {}).get("title", wid) for wid in extra)))
-    metadata = details(order)
     state = read_state()
     sources = download_many(order, force=force or any(wid in state for wid in order))
+    resolutions = _resolution_cache(state)
+    if deps:
+        order, resolutions = _expand_mod_dependencies(order, sources)
+    metadata = details(order)
     for wid in order:
         install_one(wid, metadata.get(wid), force=force,
                     source=sources.get(wid), downloaded=True)
+    _persist_resolutions(resolutions)
     missing = missing_requirements()
     if missing:
         print("  ! thiếu mod bắt buộc: %s" % ", ".join(missing))
@@ -730,6 +889,16 @@ def requires(wid):
     return out[:20]
 
 
+def _listing_ids(html):
+    ids, seen = [], set()
+    for match in re.finditer(r"sharedfiles/filedetails/\?id=(\d+)", html):
+        wid = match.group(1)
+        if wid not in seen and wid not in PINNED:
+            seen.add(wid)
+            ids.append(wid)
+    return ids
+
+
 def browse(query="", sort="trend", page=1, tags=(), days=None):
     """Scrape workshop listing ids; the keyless details API supplies metadata."""
     wid = maybe_id(query)
@@ -747,12 +916,7 @@ def browse(query="", sort="trend", page=1, tags=(), days=None):
         fields.append(("special_filter", SPECIAL_FILTER[browse_sort]))
     fields.extend(("requiredtags[]", tag) for tag in tags)
     html = cached_page(BROWSE + urllib.parse.urlencode(fields))
-    ids, seen = [], set()
-    for match in re.finditer(r"sharedfiles/filedetails/\?id=(\d+)", html):
-        if match.group(1) not in seen and match.group(1) not in PINNED:
-            seen.add(match.group(1))
-            ids.append(match.group(1))
-    return ids
+    return _listing_ids(html)
 
 
 def cmd_search(args):
@@ -1049,6 +1213,32 @@ def cmd_selftest(args):
     assert as_id(" 456 ") == "456"
     assert _steamcmd_success_id("Success. Downloaded item 456 to x") == "456"
     assert _steamcmd_success_id("ERROR! Download item 456 failed") is None
+    assert _resolution_cache({"1": {"resolved": {
+        "Found": "22", "Unresolved": None}}}) == {
+            "found": "22", "unresolved": None}
+    with tempfile.TemporaryDirectory(prefix="pzmod-resolver-") as root:
+        html = "".join('<a href="sharedfiles/filedetails/?id=%s">x</a>' % wid
+                       for wid in ("11", "22", "33", "44"))
+        candidates = _listing_ids(html)
+        sources = {}
+        for wid, modid in (("11", "Wrong"), ("22", "NeatUI_Framework"),
+                           ("33", "AlsoWrong"), ("44", "OnlyFourth")):
+            folder = os.path.join(root, wid, "mods", "Fixture")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "mod.info"), "w", encoding="utf-8") as info:
+                info.write("id=%s\n" % modid)
+            sources[wid] = os.path.join(root, wid)
+        assert _matching_candidate("NeatUI_Framework", candidates, sources) == "22"
+        assert _matching_candidate("neatui_framework", candidates, sources) is None
+        assert _matching_candidate("OnlyFourth", candidates, sources) is None
+        folder = os.path.join(root, "55", "mods", "Equipment")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "mod.info"), "w", encoding="utf-8") as info:
+            info.write("id=Equipment\nrequire=NeatUI_Framework\n")
+        sources["55"] = os.path.join(root, "55")
+        order, cache = _expand_mod_dependencies(["55"], sources, state={})
+        assert order == ["22", "55"]
+        assert cache["neatui_framework"] == "22"
     assert strip_bb("a [url=x]link[/url] b") == "a link b"
     long_tag = "[url=https://example.invalid/" + "x" * 80 + "]"
     assert strip_bb("a " + long_tag + "link[/url] b") == "a link b"

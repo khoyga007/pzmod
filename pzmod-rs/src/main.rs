@@ -972,6 +972,97 @@ fn mod_metadata(roots: &[ModRoot]) -> Result<(Vec<String>, Vec<String>), String>
     Ok((modids, required))
 }
 
+fn source_metadata(source: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+    mod_metadata(&mod_roots(source)?)
+}
+
+fn source_provides_modid(source: &Path, wanted: &str) -> Result<bool, String> {
+    Ok(source_metadata(source)?
+        .0
+        .iter()
+        .any(|modid| modid == wanted))
+}
+
+fn matching_candidate(
+    wanted: &str,
+    candidates: &[String],
+    sources: &HashMap<String, PathBuf>,
+) -> Result<Option<String>, String> {
+    for id in candidates.iter().take(3) {
+        if sources
+            .get(id)
+            .is_some_and(|source| source_provides_modid(source, wanted).unwrap_or(false))
+        {
+            return Ok(Some(id.clone()));
+        }
+    }
+    Ok(None)
+}
+
+type ResolutionCache = HashMap<String, Option<String>>;
+
+fn resolution_cache(state: &Map<String, Value>) -> ResolutionCache {
+    let mut cache = HashMap::new();
+    for resolved in state
+        .values()
+        .filter_map(|entry| entry.get("resolved").and_then(Value::as_object))
+    {
+        for (modid, value) in resolved {
+            let key = normalize_required(modid).to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            if value.is_null() {
+                cache.entry(key).or_insert(None);
+            } else if let Some(id) = value
+                .as_str()
+                .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                cache.insert(key, Some(id.to_string()));
+            }
+        }
+    }
+    cache
+}
+
+fn persist_resolutions(user: &Path, cache: &ResolutionCache) -> Result<(), String> {
+    let mut state = managed_state(user);
+    let mut changed = false;
+    for entry in state.values_mut() {
+        if !entry.is_object() {
+            continue;
+        }
+        let mut resolved = Map::new();
+        for modid in entry
+            .get("require")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if let Some(id) = cache.get(&normalize_required(modid).to_lowercase()) {
+                resolved.insert(
+                    modid.to_string(),
+                    id.as_ref()
+                        .map_or(Value::Null, |id| Value::String(id.clone())),
+                );
+            }
+        }
+        let value = Value::Object(resolved);
+        if entry.get("resolved") != Some(&value) {
+            entry
+                .as_object_mut()
+                .unwrap()
+                .insert("resolved".into(), value);
+            changed = true;
+        }
+    }
+    if changed {
+        write_managed_state(user, &state)?;
+    }
+    Ok(())
+}
+
 fn folder_status_at(mods: &Path, off: &Path, folder: &str) -> &'static str {
     if check_folder(folder).is_err() {
         return "invalid";
@@ -1315,6 +1406,7 @@ fn state_internal(game: &Path, user: &Path) -> Result<State, String> {
                 "updated": value_u64(entry, "updated"),
                 "modids": entry.get("modids").cloned().unwrap_or_else(|| json!([])),
                 "require": entry.get("require").cloned().unwrap_or_else(|| json!([])),
+                "resolved": entry.get("resolved").cloned().unwrap_or_else(|| json!({})),
                 "folders": folder_values,
                 "present": present,
             }),
@@ -1534,6 +1626,7 @@ fn install_from_source(
                 "folders": roots.iter().map(|root| root.folder.clone()).collect::<Vec<_>>(),
                 "modids": modids,
                 "require": required,
+                "resolved": previous.get("resolved").cloned().unwrap_or_else(|| json!({})),
             }),
         );
         write_managed_state(user, &state)
@@ -1640,6 +1733,217 @@ fn walk_dependencies(
     order.push(id.to_string());
 }
 
+fn search_ids(query: &str) -> Result<Vec<String>, String> {
+    let fields = vec![
+        ("appid".into(), APPID.into()),
+        ("section".into(), "readytouseitems".into()),
+        ("browsesort".into(), "textsearch".into()),
+        ("p".into(), "1".into()),
+        ("searchtext".into(), query.into()),
+    ];
+    let html = cached_listing(&(BROWSE_URL.to_string() + &form_body(&fields)))
+        .map_err(|error| error.to_string())?;
+    Ok(extract_listing_ids(&html).into_iter().take(3).collect())
+}
+
+fn search_modid_candidates(modid: &str) -> Result<Vec<String>, String> {
+    let spaced = modid.replace('_', " ");
+    let candidates = search_ids(&spaced)?;
+    if candidates.is_empty() && spaced != modid {
+        search_ids(modid)
+    } else {
+        Ok(candidates)
+    }
+}
+
+fn resolve_modid(
+    modid: &str,
+    cache: &mut ResolutionCache,
+) -> Result<Option<(String, PathBuf)>, String> {
+    let key = normalize_required(modid).to_lowercase();
+    if let Some(cached) = cache.get(&key).cloned() {
+        let Some(id) = cached else {
+            return Ok(None);
+        };
+        let mut sources = download_items(std::slice::from_ref(&id), false)?;
+        if sources
+            .get(&id)
+            .is_some_and(|source| source_provides_modid(source, modid).unwrap_or(false))
+        {
+            return Ok(sources.remove(&id).map(|source| (id, source)));
+        }
+        cache.remove(&key);
+    }
+
+    let candidates = search_modid_candidates(modid)?;
+    if candidates.is_empty() {
+        cache.insert(key, None);
+        return Ok(None);
+    }
+    let mut sources = download_items(&candidates, false)?;
+    let matched = matching_candidate(modid, &candidates, &sources)?;
+    cache.insert(key, matched.clone());
+    Ok(matched.and_then(|id| sources.remove(&id).map(|source| (id, source))))
+}
+
+fn index_sources(sources: &HashMap<String, PathBuf>, providers: &mut HashMap<String, String>) {
+    for (id, source) in sources {
+        if let Ok((modids, _)) = source_metadata(source) {
+            for modid in modids {
+                providers.entry(modid.to_lowercase()).or_insert(id.clone());
+            }
+        }
+    }
+}
+
+fn installed_providers(user: &Path, state: &Map<String, Value>) -> HashMap<String, String> {
+    let mods = user.join("mods");
+    let off = user.join("mods_off");
+    let mut providers = HashMap::new();
+    for (id, entry) in state {
+        if !entry_complete(entry, &mods, &off) {
+            continue;
+        }
+        for modid in entry
+            .get("modids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            providers.entry(modid.to_lowercase()).or_insert(id.clone());
+        }
+    }
+    providers
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_mod_dependencies(
+    id: &str,
+    depth: usize,
+    sources: &mut HashMap<String, PathBuf>,
+    providers: &mut HashMap<String, String>,
+    cache: &mut ResolutionCache,
+    seen: &mut HashSet<String>,
+    order: &mut Vec<String>,
+    log: &mut Vec<String>,
+) -> Result<(), String> {
+    if !seen.insert(id.to_string()) {
+        return Ok(());
+    }
+    let required = match sources.get(id).map(|source| source_metadata(source)) {
+        Some(Ok((_, required))) => required,
+        Some(Err(error)) => {
+            log.push(format!("! {id}: không đọc được mod.info ({error})"));
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
+    for modid in required {
+        let key = modid.to_lowercase();
+        if let Some(provider) = providers.get(&key).cloned() {
+            cache.insert(key, Some(provider.clone()));
+            if sources.contains_key(&provider) {
+                walk_mod_dependencies(
+                    &provider,
+                    depth.saturating_sub(1),
+                    sources,
+                    providers,
+                    cache,
+                    seen,
+                    order,
+                    log,
+                )?;
+            }
+            continue;
+        }
+        if depth == 0 {
+            continue;
+        }
+        let (provider, source) = match resolve_modid(&modid, cache) {
+            Ok(Some(resolved)) => resolved,
+            Ok(None) => continue,
+            Err(error) => {
+                log.push(format!("! {modid}: không dò được workshop id ({error})"));
+                continue;
+            }
+        };
+        sources.insert(provider.clone(), source);
+        index_sources(sources, providers);
+
+        let title = details(std::slice::from_ref(&provider))
+            .ok()
+            .and_then(|metadata| {
+                metadata
+                    .get(&provider)
+                    .map(|item| value_string(item, "title"))
+            })
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| provider.clone());
+        log.push(format!("kèm mod bắt buộc: {title} ({provider})"));
+
+        let mut workshop_seen = HashSet::new();
+        let mut workshop_order = Vec::new();
+        walk_dependencies(
+            &provider,
+            depth - 1,
+            &mut workshop_seen,
+            &mut workshop_order,
+            log,
+        );
+        let needed: Vec<_> = workshop_order
+            .iter()
+            .filter(|item| !sources.contains_key(*item))
+            .cloned()
+            .collect();
+        if !needed.is_empty() {
+            sources.extend(download_items(&needed, false)?);
+            index_sources(sources, providers);
+        }
+        for item in workshop_order {
+            walk_mod_dependencies(
+                &item,
+                depth - 1,
+                sources,
+                providers,
+                cache,
+                seen,
+                order,
+                log,
+            )?;
+        }
+    }
+    order.push(id.to_string());
+    Ok(())
+}
+
+fn expand_mod_dependencies(
+    initial: Vec<String>,
+    user: &Path,
+    sources: &mut HashMap<String, PathBuf>,
+    log: &mut Vec<String>,
+) -> Result<(Vec<String>, ResolutionCache), String> {
+    let state = managed_state(user);
+    let mut cache = resolution_cache(&state);
+    let mut providers = installed_providers(user, &state);
+    index_sources(sources, &mut providers);
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    for id in initial {
+        walk_mod_dependencies(
+            &id,
+            4,
+            sources,
+            &mut providers,
+            &mut cache,
+            &mut seen,
+            &mut order,
+            log,
+        )?;
+    }
+    Ok((order, cache))
+}
+
 fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> {
     if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("bad id".into());
@@ -1690,10 +1994,11 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
         ));
     }
 
-    let metadata = details(&order)?;
     let state = managed_state(user);
     let refresh_cache = force || order.iter().any(|item| state.contains_key(item));
-    let downloaded = download_items(&order, refresh_cache)?;
+    let mut downloaded = download_items(&order, refresh_cache)?;
+    let (order, resolutions) = expand_mod_dependencies(order, user, &mut downloaded, &mut log)?;
+    let metadata = details(&order)?;
     let mut ok = true;
     for item in order {
         match metadata.get(&item) {
@@ -1716,6 +2021,10 @@ fn install_internal(id: &str, force: bool, user: &Path) -> Result<Done, String> 
                 log.push(format!("! {item}: mod đã bị xoá hoặc đặt riêng tư"));
             }
         }
+    }
+    if let Err(error) = persist_resolutions(user, &resolutions) {
+        ok = false;
+        log.push(format!("! không lưu được ánh xạ mod id ({error})"));
     }
     let state = managed_state(user);
     let missing = missing_modids(&state, &user.join("mods"), &user.join("mods_off"));
@@ -2294,6 +2603,57 @@ mod tests {
     }
 
     #[test]
+    fn modid_resolver_checks_only_three_exact_candidates() {
+        let root = test_root("modid-resolver");
+        let html = ["11", "22", "33", "44"]
+            .map(|id| format!("<a href=\"sharedfiles/filedetails/?id={id}\">x</a>"))
+            .join("");
+        let candidates = extract_listing_ids(&html);
+        let mut sources = HashMap::new();
+        for (id, modid) in [
+            ("11", "Wrong"),
+            ("22", "NeatUI_Framework"),
+            ("33", "AlsoWrong"),
+            ("44", "OnlyFourth"),
+        ] {
+            let source = root.join(id);
+            let folder = source.join("mods").join("Fixture");
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("mod.info"), format!("id={modid}\n")).unwrap();
+            sources.insert(id.to_string(), source);
+        }
+        assert_eq!(
+            matching_candidate("NeatUI_Framework", &candidates, &sources).unwrap(),
+            Some("22".into())
+        );
+        assert_eq!(
+            matching_candidate("neatui_framework", &candidates, &sources).unwrap(),
+            None,
+            "mod.info id matching must be exact"
+        );
+        assert_eq!(
+            matching_candidate("OnlyFourth", &candidates, &sources).unwrap(),
+            None,
+            "rank four must never be installed"
+        );
+        let equipment = root.join("55");
+        let folder = equipment.join("mods").join("Equipment");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("mod.info"),
+            "id=Equipment\nrequire=NeatUI_Framework\n",
+        )
+        .unwrap();
+        sources.insert("55".into(), equipment);
+        let (order, cache) =
+            expand_mod_dependencies(vec!["55".into()], &root, &mut sources, &mut Vec::new())
+                .unwrap();
+        assert_eq!(order, ["22", "55"]);
+        assert_eq!(cache["neatui_framework"], Some("22".into()));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn state_reads_the_python_schema() {
         let user = test_root("state");
         let mods = user.join("mods");
@@ -2309,6 +2669,7 @@ mod tests {
             }),
         )]);
         write_managed_state(&user, &state).unwrap();
+        persist_resolutions(&user, &HashMap::from([("missingid".into(), None)])).unwrap();
 
         let snapshot = state_internal(Path::new(r"D:\ProjectZomboid"), &user).unwrap();
         assert_eq!(snapshot.installed["10"]["title"], "Owned item");
@@ -2316,6 +2677,7 @@ mod tests {
         assert_eq!(snapshot.loose.len(), 1);
         assert_eq!(snapshot.loose[0].name, "Loose");
         assert_eq!(snapshot.missing, ["MissingID"]);
+        assert!(snapshot.installed["10"]["resolved"]["MissingID"].is_null());
         let json = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(json["sorts"]["trend"], "Thịnh hành tuần");
         assert!(json["tags"].as_array().unwrap().len() > 20);

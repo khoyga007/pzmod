@@ -30,9 +30,10 @@ STATE = os.path.join(USER, ".pzmod.json")
 ```json
 {"<workshop_id>": {"title": "...", "updated": 1690000000, "size": 46912811,
                    "folders": ["Hydrocraft"], "modids": ["Hydrocraft"],
-                   "require": ["OtherModId"]}}
+                   "require": ["OtherModId"],
+                   "resolved": {"OtherModId": "<workshop_id>"}}}
 ```
-`folders` = dir names created under MODS (one item can install several). `modids` = `id=` from each mod.info. `require` = union of `require=` values.
+`folders` = dir names created under MODS (one item can install several). `modids` = `id=` from each mod.info. `require` = union of `require=` values. `resolved` caches each mod id as a verified workshop id, or `null` when the top three search candidates did not provide an exact `id=` match.
 
 ## Work split
 
@@ -53,7 +54,7 @@ Change:
 2. `parse_modinfo(path) -> dict` (key=value lines, `#` comments, last wins; tolerate BOM + CRLF + non-UTF8 → decode utf-8 errors=replace).
 3. Deps, two sources — both must run:
    - workshop `Required Items` scrape (ddmod `requires()`, reuse as-is) → workshop ids, install those first (post-order like ddmod `with_deps`).
-   - after install: union of `require=` mod ids across installed mods minus installed `modids` → print `! thiếu mod bắt buộc: <ids>` and expose in state so GUI can show it. Do NOT try to resolve mod id → workshop id (no public mapping); just report.
+   - after download: union of `require=` mod ids across the install queue minus known `modids` → search Workshop with `_` changed to spaces (raw mod id only when that search is empty), inspect at most the top three downloads, and accept only an exact `id=` match. Install verified matches dependency-first, recurse with the existing depth cap, and cache matches/misses in `resolved`. Never install a search guess. Any unresolved ids still print as `! thiếu mod bắt buộc: <ids>` and remain exposed to the GUI.
 4. `list`/`update`/`remove` operate on `folders`, and must also clean the same folder if it sits in `OFF` (disabled).
 5. Keep `selftest` in ddmod style: pure-logic asserts + parse_modinfo cases + one live details() check on 498441420 (`consumer_app_id == 108600`), network parts skippable on `Blocked`.
 6. CLI surface (bat wrappers `pzmod.bat`, `pzmod-gui.bat` — copy DD ones, rename): `search info install remove list update reinstall enable disable bisect selftest`. `enable/disable/bisect` delegate to Ariel's module.
