@@ -209,13 +209,26 @@ def installed_modids(state=None):
     return out
 
 
+def _require_id(value):
+    return value.strip().lstrip("\\/").strip()
+
+
+def _missing_modids(required, supplied):
+    supplied = {value.casefold() for value in supplied}
+    normalized = {}
+    for value in required:
+        value = _require_id(value)
+        if value:
+            normalized.setdefault(value.casefold(), value)
+    return sorted((value for key, value in normalized.items() if key not in supplied),
+                  key=str.casefold)
+
+
 def missing_requirements(state=None):
     """Return required mod ids not supplied by any installed workshop item."""
     state = read_state() if state is None else state
-    supplied = installed_modids(state)
-    required = {value for entry in state.values()
-                for value in entry.get("require", []) if value}
-    return sorted(required - supplied, key=str.lower)
+    required = (value for entry in state.values() for value in entry.get("require", []))
+    return _missing_modids(required, installed_modids(state))
 
 
 def parse_modinfo(path):
@@ -244,13 +257,32 @@ def _mod_roots(item_dir):
         root = os.path.join(mods_dir, folder)
         if not os.path.isdir(root):
             continue
-        infos = [os.path.join(root, "mod.info"),
-                 os.path.join(root, "41", "mod.info"),
-                 os.path.join(root, "42", "mod.info")]
-        infos = [path for path in infos if os.path.isfile(path)]
+        infos = []
+        for current, dirs, files in os.walk(root):
+            dirs.sort(key=str.lower)
+            if "mod.info" in files:
+                infos.append(os.path.join(current, "mod.info"))
         if infos:
             roots.append((folder, root, infos))
     return roots
+
+
+def _mod_metadata(roots):
+    modids, required = [], []
+    modid_keys, required_keys = set(), set()
+    for _, _, info_paths in roots:
+        for info_path in info_paths:
+            info = parse_modinfo(info_path)
+            modid = info.get("id")
+            if modid and modid.casefold() not in modid_keys:
+                modid_keys.add(modid.casefold())
+                modids.append(modid)
+            for dependency in info.get("require", "").split(","):
+                dependency = _require_id(dependency)
+                if dependency and dependency.casefold() not in required_keys:
+                    required_keys.add(dependency.casefold())
+                    required.append(dependency)
+    return modids, required
 
 
 def download(wid, force=False):
@@ -322,16 +354,7 @@ def install_one(wid, detail=None, force=False):
             print("  ! %s: thư mục %s đã tồn tại và không thuộc bản cài này" % (title, folder))
             return False
 
-    modids, required = [], []
-    for _, _, info_paths in roots:
-        for info_path in info_paths:
-            info = parse_modinfo(info_path)
-            if info.get("id") and info["id"] not in modids:
-                modids.append(info["id"])
-            for dependency in info.get("require", "").split(","):
-                dependency = dependency.strip()
-                if dependency and dependency not in required:
-                    required.append(dependency)
+    modids, required = _mod_metadata(roots)
 
     os.makedirs(USER, exist_ok=True)
     os.makedirs(MODS, exist_ok=True)
@@ -727,18 +750,25 @@ def cmd_selftest(args):
     with tempfile.TemporaryDirectory(prefix="pzmod-logic-") as root:
         mods = os.path.join(root, "mods")
         os.makedirs(os.path.join(mods, "Direct"))
-        os.makedirs(os.path.join(mods, "Builds", "42"))
+        os.makedirs(os.path.join(mods, "Builds", "42.20"))
         direct = os.path.join(mods, "Direct", "mod.info")
-        build = os.path.join(mods, "Builds", "42", "mod.info")
+        build = os.path.join(mods, "Builds", "42.20", "mod.info")
         with open(direct, "wb") as info_file:
-            info_file.write(b"\xef\xbb\xbf# ignored\r\nname=old\r\nname=New\r\nid=DirectID\xff\r\nrequire=A, B\r\n")
+            info_file.write(b"\xef\xbb\xbf# ignored\r\nname=old\r\nname=New\r\nid=DirectID\r\nbad=\xff\r\nrequire=A, B\r\n")
         with open(build, "wb") as info_file:
-            info_file.write(b"id=BuildID\n")
+            info_file.write(b"id=BuildID\nrequire=\\DirectID, /Other\n")
         parsed = parse_modinfo(direct)
         assert parsed["name"] == "New", "last key must win"
         assert parsed["require"] == "A, B"
+        assert _require_id("  \\/ZombieBuddy ") == "ZombieBuddy"
+        assert _missing_modids(["\\ZombieBuddy", "/Other"],
+                               ["zombiebuddy"]) == ["Other"]
         found = _mod_roots(root)
         assert [entry[0] for entry in found] == ["Builds", "Direct"]
+        modids, required = _mod_metadata(found)
+        assert modids == ["BuildID", "DirectID"]
+        assert required == ["DirectID", "Other", "A", "B"]
+        assert _missing_modids(required, modids) == ["A", "B", "Other"]
     check_cache()
     try:
         assert len(browse(sort="trend")) > 10, "workshop browse layout changed"
