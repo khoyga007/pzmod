@@ -13,8 +13,8 @@ Build: `build.bat` / `dev.bat`. Both call vcvars64 first — see memory
 | `GET /api/state` | `snapshot()` | `state` | partial — folders only; no workshop entries, tags, sorts |
 | `POST /api/enable` | `pzbisect.enable` | `enable` | done |
 | `POST /api/disable` | `pzbisect.disable` | `disable` | done |
-| `GET /api/browse` | `pzmod.browse()` HTML scrape | — | todo, needs HTTP crate |
-| `GET /api/detail` | `pzmod.details()` + `requires()` | — | todo |
+| `GET /api/browse` | `pzmod.browse()` HTML scrape | `browse` | done |
+| `GET /api/detail` | `pzmod.details()` + `requires()` | `detail` | done |
 | `POST /api/install` | steamcmd + `with_deps` | — | todo, `Command` spawn |
 | `POST /api/update` / `/api/remove` | state-file lane | — | todo |
 | `POST /api/bisect` | `pzbisect.bisect_*` | — | todo, blocked on Selica's 4 findings |
@@ -34,7 +34,5 @@ stays the working build until the table is full.
 
 ## Next
 
-1. HTTP lane: pick crate (`ureq` + rustls, no tokio) -> browse/detail. Keep the
-   2s rate-limit gap and the on-disk cache; a Steam ban hits the whole machine.
-2. steamcmd lane: `std::process::Command`, same argv as `pzmod.py`.
-3. bisect lane: port only AFTER Ariel's fixes land — the Python version is the spec.
+1. steamcmd lane: `std::process::Command`, same argv as `pzmod.py`.
+2. bisect lane: port only AFTER Ariel's fixes land — the Python version is the spec.

@@ -10,6 +10,8 @@
     "/api/state": "state",
     "/api/enable": "enable",
     "/api/disable": "disable",
+    "/api/browse": "browse",
+    "/api/detail": "detail",
   };
 
   var NOT_YET = "Chức năng này chưa port sang bản Rust. Dùng pzmod-gui.bat (bản Python) cho tới khi xong.";
@@ -39,6 +41,11 @@
       // GET: query string -> tham số lệnh
       var q = url.indexOf("?") >= 0 ? new URLSearchParams(url.split("?")[1]) : null;
       if (q) q.forEach(function (v, k) { args[k] = v; });
+      if (cmd === "browse") {
+        args.page = Math.max(1, Number(args.page) || 1);
+        args.tags = q ? q.getAll("tag") : [];
+        delete args.tag;
+      }
     }
 
     return core.invoke(cmd, args)
