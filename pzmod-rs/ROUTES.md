@@ -17,7 +17,7 @@ Build: `build.bat` / `dev.bat`. Both call vcvars64 first — see memory
 | `GET /api/detail` | `pzmod.details()` + `requires()` | `detail` | done |
 | `POST /api/install` | steamcmd + `with_deps` | — | todo, `Command` spawn |
 | `POST /api/update` / `/api/remove` | state-file lane | — | todo |
-| `POST /api/bisect` | `pzbisect.bisect_*` | — | todo, blocked on Selica's 4 findings |
+| `POST /api/bisect` | `pzbisect.bisect_*` | `bisect` | done |
 | `GET /img?u=` | CDN proxy + allowlist | none needed | webview loads Steam CDN direct (`csp: null`) |
 | `GET /tokens.css` | file serve | none needed | shipped inside `ui/` |
 
