@@ -51,6 +51,10 @@ SORTS = {"trend": "Thịnh hành tuần", "totaluniquesubscriptions": "Nhiều s
 # Số 6 lấy từ hàm onViewAll trong bundle JS của trang chủ workshop.
 SPECIAL_FILTER = {"num_parent_items": "6"}
 
+# Steam ghim thông báo "Modding Policy" của Spiffo's Workshop lên đầu MỌI danh
+# sách, kiểu sắp xếp nào cũng có, 0 sub. Nó không phải mod, không cài được.
+PINNED = {"2872282653"}
+
 # Steam bỏ qua browsesort nếu thiếu days: hỏi "nhiều sub nhất" mà không kèm cửa
 # sổ thời gian thì nó trả về đúng danh sách trending, nên bộ lọc trông như chết.
 # "toprated" cố tình không có mặt: Steam xếp theo sao và bỏ qua days, gửi kèm
@@ -599,7 +603,7 @@ def browse(query="", sort="trend", page=1, tags=(), days=None):
     html = cached_page(BROWSE + urllib.parse.urlencode(fields))
     ids, seen = [], set()
     for match in re.finditer(r"sharedfiles/filedetails/\?id=(\d+)", html):
-        if match.group(1) not in seen:
+        if match.group(1) not in seen and match.group(1) not in PINNED:
             seen.add(match.group(1))
             ids.append(match.group(1))
     return ids

@@ -333,8 +333,16 @@ fn ids_after(html: &str, marker: &str) -> Vec<String> {
     out
 }
 
+/// Steam pins Spiffo's Workshop "Modding Policy" notice to the top of every
+/// listing, under every sort, with zero subscribers. It is not a mod and cannot
+/// be installed, so it never reaches the grid.
+const PINNED: &[&str] = &["2872282653"];
+
 fn extract_listing_ids(html: &str) -> Vec<String> {
     ids_after(html, "sharedfiles/filedetails/?id=")
+        .into_iter()
+        .filter(|id| !PINNED.contains(&id.as_str()))
+        .collect()
 }
 
 fn required_ids(id: &str) -> Result<Vec<String>, Blocked> {
@@ -2204,6 +2212,13 @@ mod tests {
     fn parses_cached_workshop_listing_fixture() {
         let html = include_str!("../tests/fixtures/workshop_browse.html");
         assert_eq!(extract_listing_ids(html), ["111", "222"]);
+    }
+
+    #[test]
+    fn the_pinned_policy_notice_never_reaches_the_grid() {
+        let html = r#"<a href="sharedfiles/filedetails/?id=2872282653">policy</a>
+            <a href="sharedfiles/filedetails/?id=111">a real mod</a>"#;
+        assert_eq!(extract_listing_ids(html), ["111"]);
     }
 
     #[test]
