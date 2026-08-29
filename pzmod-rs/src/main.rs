@@ -292,7 +292,7 @@ fn cached_page(url: &str, ttl: Duration) -> Result<String, Blocked> {
             write_cache(url, &html)?;
             Ok(html)
         }
-        Err(why) => cached(url, None).ok_or_else(|| Blocked(why)),
+        Err(why) => cached(url, None).ok_or(Blocked(why)),
     }
 }
 
