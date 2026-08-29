@@ -28,7 +28,11 @@ html {
 
 body {
   margin: 0;
-  min-height: 100vh;
+  /* Exactly one viewport tall, not "at least": with min-height the middle row
+     grows past the screen and the whole page scrolls, dragging the rail and its
+     tabs out of view. Fixed height keeps the scrolling inside .main. */
+  height: 100dvh;
+  overflow: hidden;
   display: grid;
   grid-template-rows: var(--bar-h) minmax(0, 1fr) var(--status-h);
   font-size: var(--text-base);
