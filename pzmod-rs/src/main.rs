@@ -3170,10 +3170,7 @@ mod tests {
         let mut order = Vec::new();
         post_order("1", &graph, &mut seen, &mut order);
         assert_eq!(order, ["4", "2", "3", "1"]);
-        assert_eq!(
-            dedup_ids(&["1".into(), "2".into(), "1".into()]),
-            ["1", "2"]
-        );
+        assert_eq!(dedup_ids(&["1".into(), "2".into(), "1".into()]), ["1", "2"]);
     }
 
     #[test]
@@ -3618,7 +3615,10 @@ mod tests {
 
         // 5. TTL expired + refresh impossible (nothing listening) ->
         //    cached_page still serves the stale copy instead of failing.
-        assert_eq!(cached_page(url, Duration::ZERO, ITEM_GAP).unwrap(), good_html);
+        assert_eq!(
+            cached_page(url, Duration::ZERO, ITEM_GAP).unwrap(),
+            good_html
+        );
 
         if let Some(prev) = prev_user {
             std::env::set_var("PZ_USER", prev);

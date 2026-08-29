@@ -136,7 +136,6 @@ ITEM_GAP = 0.8
 ITEM_WORKERS = 3
 # A 429 anywhere drops the whole process back to the listing cadence for a while.
 RATE_LIMIT_COOLDOWN = 20 * 60
-_gap_floor = [0.0]
 _gap_floor_until = [0.0]
 _last_hit = [0.0]
 _hit_lock = threading.Lock()
@@ -895,10 +894,18 @@ _revalidating_lock = threading.Lock()
 
 def _effective_gap(gap, now=None):
     """Gap to honour right now, letting a rate-limit penalty expire on its own."""
-    now = time.time() if now is None else now
-    if _gap_floor[0] and now >= _gap_floor_until[0]:
-        _gap_floor[0] = 0.0
-    return max(gap, _gap_floor[0])
+    now = time.monotonic() if now is None else now
+    if now < _gap_floor_until[0]:
+        return max(gap, BROWSE_GAP)
+    _gap_floor_until[0] = 0.0
+    return gap
+
+
+def _note_rate_limit(now=None):
+    """Atomically extend the shared cooldown using an interval-safe clock."""
+    now = time.monotonic() if now is None else now
+    with _hit_lock:
+        _gap_floor_until[0] = now + RATE_LIMIT_COOLDOWN
 
 
 def _revalidate_bg(url, gap=BROWSE_GAP):
@@ -926,19 +933,19 @@ def _fetch_and_cache(url, is_foreground=True, gap=BROWSE_GAP):
                 time.sleep(0.1)
                 continue
             with _hit_lock:
-                wait = _effective_gap(gap) - (time.time() - _last_hit[0])
+                wait = _effective_gap(gap) - (time.monotonic() - _last_hit[0])
                 if wait > 0:
                     if not is_foreground:
-                        start = time.time()
-                        while time.time() - start < wait:
+                        start = time.monotonic()
+                        while time.monotonic() - start < wait:
                             if _foreground_active[0] > 0:
                                 break
-                            time.sleep(min(0.05, wait - (time.time() - start)))
+                            time.sleep(min(0.05, wait - (time.monotonic() - start)))
                         if _foreground_active[0] > 0:
                             continue
                     else:
                         time.sleep(wait)
-                _last_hit[0] = time.time()
+                _last_hit[0] = time.monotonic()
                 break
 
         try:
@@ -960,8 +967,7 @@ def _fetch_and_cache(url, is_foreground=True, gap=BROWSE_GAP):
 
         if html is None:
             if why is RATE_LIMITED:
-                _gap_floor[0] = BROWSE_GAP
-                _gap_floor_until[0] = time.time() + RATE_LIMIT_COOLDOWN
+                _note_rate_limit()
             raise Blocked(why)
 
         os.makedirs(CACHE_DIR, exist_ok=True)
@@ -1356,13 +1362,14 @@ def check_dependency_batching():
     """Resolution must go level by level and share steamcmd sessions."""
     global requires_many, download_many, steamcmd, _search_modid_candidates
     keep = (requires_many, download_many, steamcmd, _search_modid_candidates)
-    floor = (_gap_floor[0], _gap_floor_until[0])
+    floor_until = _gap_floor_until[0]
     try:
-        _gap_floor[0], _gap_floor_until[0] = BROWSE_GAP, time.time() + 60
-        assert _effective_gap(ITEM_GAP) == BROWSE_GAP, "a 429 must slow every page down"
-        _gap_floor_until[0] = time.time() - 1
-        assert _effective_gap(ITEM_GAP) == ITEM_GAP, "the penalty must expire on its own"
-        assert _gap_floor[0] == 0.0
+        clock = time.monotonic()
+        _note_rate_limit(clock)
+        assert _effective_gap(ITEM_GAP, clock) == BROWSE_GAP
+        assert _gap_floor_until[0] == clock + RATE_LIMIT_COOLDOWN
+        assert _effective_gap(ITEM_GAP, clock + RATE_LIMIT_COOLDOWN + 1) == ITEM_GAP
+        assert _gap_floor_until[0] == 0.0, "the penalty must expire on its own"
 
         graph = {"1": ["2", "3"], "2": ["4"], "3": ["4"]}
         levels = []
@@ -1376,6 +1383,14 @@ def check_dependency_batching():
         assert with_deps(["1"]) == ["4", "2", "3", "1"]
         # depth-first would have been four round trips: 1, 2, 4, 3
         assert levels == [["1"], ["2", "3"], ["4"]], levels
+
+        # DFS used to reach 4 through the deep path first and spend its depth
+        # budget, then skip the shallower 5 -> 4 path because 4 was already seen.
+        # Level-order discovery keeps the shallowest depth and therefore sees 6.
+        graph = {"1": ["2"], "5": ["4"], "2": ["4"], "4": ["6"]}
+        levels.clear()
+        assert with_deps(["1", "5"], depth=2) == ["6", "4", "2", "1", "5"]
+        assert levels == [["1", "5"], ["2", "4"]], levels
         requires_many = keep[0]
 
         with tempfile.TemporaryDirectory(prefix="pzmod-batch-") as root:
@@ -1387,6 +1402,12 @@ def check_dependency_batching():
                 with open(os.path.join(folder, "mod.info"), "w", encoding="utf-8") as info:
                     info.write("id=%s\n" % modid)
                 sources[wid] = os.path.join(content, wid)
+            for modid in ("A", "B"):
+                folder = os.path.join(content, "33", "mods", modid)
+                os.makedirs(folder)
+                with open(os.path.join(folder, "mod.info"), "w", encoding="utf-8") as info:
+                    info.write("id=%s\n" % modid)
+            sources["33"] = os.path.join(content, "33")
             steamcmd = lambda: os.path.join(root, "steamcmd.exe")
             # the stub exe cannot be spawned, so a steamcmd session here would raise
             assert download_many(["11"], reuse=True) == {"11": sources["11"]}
@@ -1406,9 +1427,19 @@ def check_dependency_batching():
             assert cache == {"a": "11", "b": "22"}
             # one session to verify what we remembered, one for the search pool
             assert calls == [["11"], ["22"]], calls
+
+            calls.clear()
+            cache = {"a": "33", "b": "33", "missing": None}
+            _search_modid_candidates = lambda modid: (_ for _ in ()).throw(
+                AssertionError("negative and verified cache entries must not search"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                resolved = _resolve_modids(["B", "Missing", "A"], cache)
+            assert resolved == [("B", "33", sources["33"]),
+                                ("A", "33", sources["33"])]
+            assert calls == [["33"]], calls
     finally:
         requires_many, download_many, steamcmd, _search_modid_candidates = keep
-        _gap_floor[0], _gap_floor_until[0] = floor
+        _gap_floor_until[0] = floor_until
 
 
 def check_mod_transactions():
