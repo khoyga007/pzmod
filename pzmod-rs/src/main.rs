@@ -2438,6 +2438,33 @@ fn update_internal(user: &Path) -> Result<Done, String> {
     Ok(Done { ok, log })
 }
 
+/// Start the game through the launcher .bat sitting next to the install.
+///
+/// `PZ-D.bat` self-elevates: steam.exe carries a `RUNASADMIN` compat flag, so a
+/// normal-integrity process cannot `OpenProcess` it, `SteamAPI_IsSteamRunning`
+/// comes back false and the OnlineFix layer pops "Steam is not launched". The
+/// spawn returns as soon as cmd hands the shim off — the UAC prompt and the game
+/// both outlive this call, so it never blocks the work lock.
+#[tauri::command]
+fn launch(nosteam: Option<bool>) -> Result<Value, String> {
+    let (game, _, _, _) = paths();
+    let name = if nosteam.unwrap_or(false) {
+        "PZ-D-nosteam.bat"
+    } else {
+        "PZ-D.bat"
+    };
+    let bat = game.join(name);
+    if !bat.is_file() {
+        return Err(format!("không thấy {name} trong {}", game.display()));
+    }
+    Command::new("cmd")
+        .args(["/c", "start", "", &bat.to_string_lossy()])
+        .current_dir(&game)
+        .spawn()
+        .map_err(|e| format!("không chạy được {name}: {e}"))?;
+    Ok(json!({ "ok": true, "log": format!("đang mở game bằng {name}") }))
+}
+
 #[tauri::command]
 async fn install(id: String, force: Option<bool>) -> Result<Done, String> {
     let (_, user, _, _) = paths();
@@ -2852,7 +2879,7 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             state, enable, disable, browse, detail, bisect, install, remove, update, prefetch,
-            progress
+            progress, launch
         ])
         .run(tauri::generate_context!())
         .expect("pzmod: tauri failed to start");

@@ -682,6 +682,10 @@ h1, h2, h3 {
   <div class="bar__spacer"></div>
   <div class="busy" id="busy"><span class="spin"></span><span id="busyText">đang chạy</span></div>
   <button class="btn" id="updateAll">Cập nhật tất cả</button>
+  <button class="btn btn--accent" id="launchGame" title="Mở game bằng PZ-D.bat (giữ chuột: bản -nosteam)">
+    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" width="14" height="14"><path d="M6 4.2v11.6a.6.6 0 0 0 .92.5l9-5.8a.6.6 0 0 0 0-1l-9-5.8a.6.6 0 0 0-.92.5Z"/></svg>
+    Chơi
+  </button>
 </header>
 
 <div class="shell">
@@ -1431,6 +1435,27 @@ $("sheetInstall").addEventListener("click", (ev) => {
 $("sheetClose").addEventListener("click", () => $("sheet").close());
 
 $("more").addEventListener("click", () => load(false));
+
+/* Chơi: PZ-D.bat tự nâng quyền cho ngang steam.exe (cờ RUNASADMIN), nếu không
+   thì SteamAPI_IsSteamRunning trả false và OnlineFix bung "Steam is not launched".
+   Chuột phải = bản -nosteam, đường chắc ăn khi nhánh Steam giở chứng. */
+async function launchGame(btn, nosteam) {
+  btn.disabled = true;
+  busy(true, nosteam ? "đang mở game (nosteam)" : "đang mở game");
+  try {
+    showLog(await api("/api/launch", nosteam ? { nosteam: true } : {}));
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+  } finally {
+    busy(false);
+    btn.disabled = false;
+  }
+}
+$("launchGame").addEventListener("click", (ev) => launchGame(ev.currentTarget, false));
+$("launchGame").addEventListener("contextmenu", (ev) => {
+  ev.preventDefault();
+  launchGame(ev.currentTarget, true);
+});
 
 $("updateAll").addEventListener("click", async (ev) => {
   ev.currentTarget.disabled = true;

@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -216,6 +217,29 @@ def detail(wid):
     return out
 
 
+LAUNCHERS = ("PZ-D.bat", "PZ-D-nosteam.bat")
+
+
+def launch_game(nosteam=False):
+    """Start the game through the launcher .bat next to the install.
+
+    PZ-D.bat self-elevates (steam.exe carries a RUNASADMIN compat flag, so a
+    normal-integrity process cannot OpenProcess it and SteamAPI_IsSteamRunning
+    comes back false -> OnlineFix pops "Steam is not launched"). Popen returns as
+    soon as the shim is spawned; the UAC prompt and the game outlive this call.
+    """
+    name = LAUNCHERS[1] if nosteam else LAUNCHERS[0]
+    bat = os.path.join(pzmod.GAME, name)
+    if not os.path.isfile(bat):
+        return {"ok": False, "error": "không thấy %s trong %s" % (name, pzmod.GAME)}
+    try:
+        subprocess.Popen(["cmd", "/c", "start", "", bat], cwd=pzmod.GAME,
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    except OSError as e:
+        return {"ok": False, "error": "không chạy được %s: %s" % (name, e)}
+    return {"ok": True, "log": "đang mở game bằng %s" % name}
+
+
 def bisect_view():
     """Bisect state plus the split the UI has to explain, or why it is unavailable."""
     module = bisect_mod()
@@ -335,6 +359,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path in ("/api/install", "/api/remove") and not wid.isdigit():
                 return self.send({"error": "bad id"}, code=400)
+            # starting the game is instant and touches nothing pzmod owns, so it
+            # must not queue behind a running install
+            if url.path == "/api/launch":
+                return self.send(launch_game(bool(body.get("nosteam"))))
             with _work:
                 if url.path == "/api/install":
                     return self.send(capture(pzmod.cmd_install, [wid], bool(body.get("force")),
