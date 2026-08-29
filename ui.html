@@ -4,532 +4,829 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pzmod — trình quản lý mod Project Zomboid</title>
+<link rel="stylesheet" href="/fonts.css">
 <link rel="stylesheet" href="/tokens.css">
 <style>
-/* Hallmark · macrostructure: Gallery-First · theme: Midnight (shared with fmod/dspmod/ddmod)
- * nav: N13 bar, search pill demoted right of the sort control — the grid is the entry
- * point, typing is optional. footer: Ft4 dense colophon.
+/* Hallmark · genre: modern-minimal · macrostructure: App Shell (deviation — the
+ * catalog's 21 shapes are landing pages; closest analogue is Workbench)
+ * theme: custom "Nightshift" · nav: left rail · footer: none (status bar)
+ * Tokens live in tokens.css — no colour or font is written literally below.
  */
 
 *, *::before, *::after { box-sizing: border-box; }
+html, body { overflow-x: clip; }
 
-html, body { overflow-x: clip; margin: 0; }
-
-body {
+html {
   background: var(--color-paper);
   color: var(--color-ink);
   font-family: var(--font-body);
-  font-size: var(--text-base);
+  font-size: 16px;
   font-weight: var(--weight-body);
-  line-height: 1.5;
+  line-height: var(--lh-body);
   -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: var(--bar-h) minmax(0, 1fr) var(--status-h);
+  font-size: var(--text-base);
 }
 
-::selection { background: var(--color-accent-dim); color: var(--color-ink); }
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-style: normal;
+  font-weight: var(--weight-bold);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  margin: 0;
+}
 
-:focus-visible {
+::selection { background: var(--color-accent-soft); color: var(--color-ink); }
+
+:where(a) { color: var(--color-accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+:where(button, input, select, a):focus-visible {
   outline: 2px solid var(--color-focus);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
+  outline-offset: 1px;
+  /* Never transitions in — a keyboard user needs the ring on the same frame. */
 }
 
-.u-nums { font-variant-numeric: tabular-nums; }
-.u-hide { display: none !important; }
+.u-nums { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
-/* ─── bar ────────────────────────────────────────────────────────── */
+.label {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-mid);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  color: var(--color-faint);
+}
 
+/* ── title bar ────────────────────────────────────────────────── */
 .bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding-inline: var(--space-md);
+  background: var(--color-paper-2);
+  border-bottom: var(--rule-hair) solid var(--color-rule);
   position: sticky;
   top: 0;
-  z-index: var(--z-sticky);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-sm) var(--space-md);
-  padding: var(--space-sm) clamp(1rem, 3vw, 1.75rem);
-  background: var(--color-paper);
-  border-bottom: var(--rule-hair) solid var(--color-rule-soft);
+  z-index: var(--z-sticky-nav);
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  margin-right: auto;
+.brand { display: flex; align-items: baseline; gap: var(--space-xs); min-width: 0; }
+.brand__mark {
   font-family: var(--font-display);
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);
   letter-spacing: -0.03em;
   line-height: 1;
-  white-space: nowrap;
 }
-
-.brand__mark { width: 0.5rem; height: 0.5rem; background: var(--color-accent); border-radius: 1px; }
-.brand__sub { color: var(--color-faint); font-size: var(--text-xs); font-weight: var(--weight-body); }
-
-.seg {
-  display: flex;
-  padding: var(--space-3xs);
-  background: var(--color-paper-2);
-  border: var(--rule-hair) solid var(--color-rule);
-  border-radius: var(--radius-pill);
+.brand__mark::after {
+  content: "";
+  display: inline-block;
+  inline-size: 5px;
+  block-size: 5px;
+  margin-inline-start: 5px;
+  border-radius: 1px;
+  background: var(--color-accent);
+  vertical-align: 0.12em;
 }
+.brand__sub { color: var(--color-faint); white-space: nowrap; }
 
-.seg button {
-  padding: var(--space-2xs) var(--space-sm);
-  background: none;
-  border: 0;
-  border-radius: var(--radius-pill);
-  color: var(--color-neutral);
-  font: inherit;
-  font-size: var(--text-sm);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color var(--dur-short) var(--ease-out), background var(--dur-short) var(--ease-out);
-}
+.bar__spacer { flex: 1 1 auto; }
 
-.seg button:hover { color: var(--color-ink); }
-.seg button[aria-pressed="true"] { background: var(--color-accent); color: var(--color-on-accent); font-weight: var(--weight-mid); }
-
-.search {
-  display: flex;
+.busy {
+  display: none;
   align-items: center;
   gap: var(--space-xs);
-  min-width: 0;
-  flex: 0 1 20rem;
-  padding: 0 var(--space-sm);
-  background: var(--color-paper-2);
-  border: var(--rule-hair) solid var(--color-rule);
-  border-radius: var(--radius-pill);
-  transition: border-color var(--dur-short) var(--ease-out);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.busy[data-on="1"] { display: flex; }
+
+/* ── shell ────────────────────────────────────────────────────── */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  min-height: 0;
 }
 
-/* The ring is an outline, never a border-width change — a border swap would shift layout. */
-.search:focus-within { border-color: var(--color-accent-dim); outline: 2px solid var(--color-focus); outline-offset: 1px; }
-.search:focus-within :focus-visible { outline: none; }
-.search__icon { flex: none; color: var(--color-neutral); }
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-md) var(--space-sm);
+  background: var(--color-paper);
+  border-right: var(--rule-hair) solid var(--color-rule);
+  overflow-y: auto;
+}
 
-.search input {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: var(--space-xs) 0;
+.rail__nav { display: flex; flex-direction: column; gap: var(--space-3xs); }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  inline-size: 100%;
+  min-block-size: 38px;
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-hair) solid transparent;
+  border-radius: var(--radius-md);
   background: none;
-  border: 0;
+  color: var(--color-muted);
+  font: inherit;
+  font-size: var(--text-base);
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-micro) var(--ease-out);
+}
+.tab svg { flex: none; inline-size: 17px; block-size: 17px; }
+.tab__count {
+  margin-inline-start: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--color-faint);
+}
+.tab:hover { background: var(--color-paper-2); color: var(--color-ink); }
+.tab:active { background: var(--color-paper-3); }
+.tab[aria-current="page"] {
+  background: var(--color-paper-3);
+  border-color: var(--color-rule);
+  color: var(--color-ink);
+  font-weight: var(--weight-mid);
+}
+.tab[aria-current="page"] svg { color: var(--color-accent); }
+.tab:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* queue — batch install picks, always in view while browsing */
+.queue {
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.queue[hidden] { display: none; }
+.queue__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  max-block-size: 190px;
+  overflow-y: auto;
+  font-size: var(--text-sm);
+}
+.queue__item { display: flex; gap: var(--space-xs); align-items: baseline; color: var(--color-muted); }
+.queue__item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue__item b { margin-inline-start: auto; font: var(--weight-body) var(--text-2xs)/1.2 var(--font-mono); color: var(--color-faint); }
+.queue__foot { display: flex; gap: var(--space-xs); align-items: center; }
+
+.rail__paths { margin-top: auto; display: flex; flex-direction: column; gap: var(--space-2xs); }
+.rail__path {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--color-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── main ─────────────────────────────────────────────────────── */
+.main { min-inline-size: 0; overflow-y: auto; }
+.view { padding: var(--space-lg) var(--space-lg) var(--space-2xl); }
+.view[hidden] { display: none; }
+
+.head { display: flex; flex-direction: column; gap: var(--space-2xs); margin-bottom: var(--space-md); }
+.head h2 { font-size: var(--text-xl); }
+.head p { margin: 0; color: var(--color-faint); font-size: var(--text-sm); max-inline-size: 68ch; }
+.head code { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); }
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-sm);
+}
+
+.field { position: relative; flex: 1 1 260px; min-inline-size: 0; display: flex; align-items: center; }
+.field svg {
+  position: absolute;
+  inset-inline-start: var(--space-sm);
+  inline-size: 15px;
+  block-size: 15px;
+  color: var(--color-faint);
+  pointer-events: none;
+}
+.input {
+  inline-size: 100%;
+  block-size: var(--control-h);
+  padding-inline: calc(var(--space-lg) + var(--space-xs)) var(--space-sm);
+  border: var(--rule-hair) solid var(--color-rule-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-paper-2);
   color: var(--color-ink);
   font: inherit;
   font-size: var(--text-sm);
-  min-height: 2rem;
+  outline: 2px solid transparent;   /* reserved so focus adds no geometry */
+  outline-offset: 1px;
+  transition: background-color var(--dur-micro) var(--ease-out);
+}
+.input::placeholder { color: var(--color-faint); }
+.input:hover { background: var(--color-paper-3); }
+.input:focus-visible { outline-color: var(--color-focus); }
+.input:disabled { opacity: 0.55; cursor: not-allowed; }
+.field kbd {
+  position: absolute;
+  inset-inline-end: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--color-faint);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  padding: 1px var(--space-2xs);
+  pointer-events: none;
 }
 
-.search input::placeholder { color: var(--color-faint); }
-.search input:focus { outline: none; }
+.seg {
+  display: flex;
+  align-items: center;
+  border: var(--rule-hair) solid var(--color-rule-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  block-size: var(--control-h);
+}
+.seg button {
+  block-size: 100%;
+  padding-inline: var(--space-sm);
+  border: 0;
+  border-inline-start: var(--rule-hair) solid var(--color-rule);
+  background: var(--color-paper-2);
+  color: var(--color-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-micro) var(--ease-out);
+}
+.seg button:first-child { border-inline-start: 0; }
+.seg button:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.seg button:active { background: var(--color-paper-4); }
+.seg button[aria-pressed="true"] { background: var(--color-paper-4); color: var(--color-ink); font-weight: var(--weight-mid); }
+.seg button:disabled { opacity: 0.55; cursor: not-allowed; }
 
-/* ─── buttons ────────────────────────────────────────────────────── */
+.chips { display: flex; flex-wrap: wrap; gap: var(--space-2xs); margin-bottom: var(--space-md); }
+.chips[hidden] { display: none; }
+.chip {
+  padding: var(--space-3xs) var(--space-xs);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-neutral);
+  font: inherit;
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--dur-micro) var(--ease-out);
+}
+.chip:hover { border-color: var(--color-rule-strong); color: var(--color-ink); }
+.chip:active { border-color: var(--color-accent-dim); }
+.chip[aria-pressed="true"] {
+  border-color: var(--color-accent-dim);
+  background: var(--color-accent-soft);
+  color: var(--color-ink);
+}
+.chip:disabled { opacity: 0.55; cursor: not-allowed; }
 
+/* ── buttons ──────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-2xs);
+  min-block-size: 30px;
   padding: var(--space-2xs) var(--space-sm);
-  min-height: 2rem;
+  border: var(--rule-hair) solid var(--color-rule-strong);
+  border-radius: var(--radius-md);
   background: var(--color-paper-2);
-  border: var(--rule-hair) solid var(--color-rule);
-  border-radius: var(--radius-sm);
   color: var(--color-ink);
   font: inherit;
   font-size: var(--text-sm);
+  line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: background var(--dur-short) var(--ease-out), border-color var(--dur-short) var(--ease-out);
+  transition: background-color var(--dur-micro) var(--ease-out);
 }
-
-.btn:hover:not(:disabled) { background: var(--color-paper-3); }
-.btn:disabled { opacity: 0.55; cursor: default; }
-.btn--accent { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); font-weight: var(--weight-mid); }
-.btn--accent:hover:not(:disabled) { background: var(--color-focus); border-color: var(--color-focus); }
-.btn--danger { color: var(--color-danger); border-color: var(--color-danger-dim); }
-.btn--danger:hover:not(:disabled) { background: var(--color-paper-3); }
-.btn--wide { width: 100%; }
-
-/* ─── chips ──────────────────────────────────────────────────────── */
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2xs);
-  padding: var(--space-sm) clamp(1rem, 3vw, 1.75rem);
-  border-bottom: var(--rule-hair) solid var(--color-rule-soft);
+/* Flex items have no intrinsic size, so an icon inside a button collapses to 0x0
+   unless it is measured here. */
+.btn svg { flex: none; inline-size: 14px; block-size: 14px; }
+.btn:hover { background: var(--color-paper-3); }
+.btn:active { background: var(--color-paper-4); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn--tall { min-block-size: var(--control-h); padding-inline: var(--space-md); }
+.btn--wide { inline-size: 100%; }
+.btn--accent {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-ink);
+  font-weight: var(--weight-mid);
 }
+.btn--accent:hover { background: var(--color-focus); border-color: var(--color-focus); }
+.btn--accent:active { background: var(--color-accent-dim); border-color: var(--color-accent-dim); }
+/* Card-level primary. Accent as TEXT, not as fill — a grid of twelve filled
+   cobalt buttons would put the accent well past its 5% ceiling. */
+.btn--go { color: var(--color-accent); }
+.btn--go:hover { background: var(--color-accent-soft); }
+.btn--go:active { background: var(--color-accent-soft); border-color: var(--color-accent); }
+.btn--danger { color: var(--color-danger); border-color: var(--color-danger-soft); }
+.btn--danger:hover { background: var(--color-danger-soft); color: var(--color-ink); }
+.btn--danger:active { background: var(--color-danger-soft); }
+.btn--quiet { border-color: transparent; background: none; color: var(--color-faint); }
+.btn--quiet:hover { background: var(--color-paper-3); color: var(--color-ink); }
 
-.chips[hidden] { display: none; }
-
-.chip {
-  padding: var(--space-3xs) var(--space-xs);
-  background: none;
-  border: var(--rule-hair) solid var(--color-rule);
-  border-radius: var(--radius-pill);
-  color: var(--color-neutral);
-  font: inherit;
-  font-size: var(--text-xs);
-  cursor: pointer;
-  transition: color var(--dur-short) var(--ease-out), border-color var(--dur-short) var(--ease-out);
+.spin {
+  display: inline-block;
+  inline-size: 11px;
+  block-size: 11px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 620ms linear infinite;
 }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.chip:hover { color: var(--color-ink); }
-.chip[aria-pressed="true"] { border-color: var(--color-accent); color: var(--color-accent); }
-
-/* ─── grid ───────────────────────────────────────────────────────── */
-
-main { flex: 1 1 auto; padding: var(--space-lg) clamp(1rem, 3vw, 1.75rem) var(--space-2xl); }
-
+/* ── workshop grid ────────────────────────────────────────────── */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
   gap: var(--space-md);
 }
 
 .card {
-  position: relative;
   display: flex;
   flex-direction: column;
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-lg);
   background: var(--color-paper-2);
-  border: var(--rule-hair) solid var(--color-rule-soft);
-  border-radius: var(--radius-md);
   overflow: hidden;
-  transition: border-color var(--dur-short) var(--ease-out);
+  position: relative;
+  transition: border-color var(--dur-micro) var(--ease-out);
 }
-
-.card:hover { border-color: var(--color-rule); }
-.card[data-installed="1"] { border-color: var(--color-accent-dim); }
+.card:hover { border-color: var(--color-rule-strong); }
 .card[data-picked="1"] { border-color: var(--color-accent); }
 
-/* Nút đánh dấu phải nằm NGOÀI .card__shot: cái đó đã là <button>, lồng nút
-   trong nút thì bàn phím không tới được cái bên trong. */
-.card__pick {
-  position: absolute;
-  top: var(--space-2xs);
-  right: var(--space-2xs);
-  z-index: 2;
-  width: 1.75rem;
-  height: 1.75rem;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  background: var(--color-paper);
-  border: var(--rule-hair) solid var(--color-rule);
-  border-radius: var(--radius-sm);
-  color: transparent;
-  font-family: var(--font-display);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-bold);
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.75;
-  transition: opacity var(--dur-short) var(--ease-out);
-}
-
-.card__pick:hover { opacity: 1; color: var(--color-neutral); }
-.card:hover .card__pick { opacity: 1; }
-.card__pick[aria-pressed="true"] {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  color: var(--color-on-accent);
-  opacity: 1;
-}
-.card[data-installed="1"] .card__pick { display: none; }
-
-/* ─── thanh gom ──────────────────────────────────────────────────── */
-
-.bulk {
-  position: fixed;
-  left: 50%;
-  bottom: var(--space-lg);
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  transform: translateX(-50%);
-  max-width: calc(100vw - 2rem);
-  padding: var(--space-xs) var(--space-sm);
-  background: var(--color-paper-3);
-  border: var(--rule-hair) solid var(--color-rule);
-  border-radius: var(--radius-md);
-  box-shadow: 0 0.5rem 1.5rem oklch(0% 0 0 / 0.45);
-}
-
-.bulk[hidden] { display: none; }
-.bulk__count { color: var(--color-ink); font-family: var(--font-display); font-size: var(--text-xs); white-space: nowrap; }
-body:has(.bulk:not([hidden])) main { padding-bottom: 6rem; }
-
 .card__shot {
-  position: relative;
   display: block;
-  width: 100%;
+  inline-size: 100%;
   aspect-ratio: 16 / 9;
   padding: 0;
-  background: var(--color-paper-3);
   border: 0;
+  border-bottom: var(--rule-hair) solid var(--color-rule);
+  background: var(--color-paper-3);
   cursor: pointer;
+  position: relative;
   overflow: hidden;
 }
-
-.card__shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
-
-.card__shot::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--color-paper);
-  opacity: 0;
-  transition: opacity var(--dur-short) var(--ease-out);
-}
-
-.card__shot:hover::after { opacity: 0.18; }
+/* Absolute, or the image's natural height wins over aspect-ratio and the row
+   ends up with thumbnails of three different heights. */
+.card__shot img { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; object-fit: cover; display: block; }
 
 .card__flag {
   position: absolute;
-  top: var(--space-2xs);
-  left: var(--space-2xs);
-  z-index: 1;
-  padding: var(--space-3xs) var(--space-2xs);
-  background: var(--color-accent);
+  inset-block-start: var(--space-xs);
+  inset-inline-start: var(--space-xs);
+  z-index: var(--z-raised);
+  padding: 1px var(--space-2xs);
   border-radius: var(--radius-sm);
-  color: var(--color-on-accent);
-  font-family: var(--font-display);
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-bold);
-  letter-spacing: 0.04em;
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  font: var(--weight-mid) var(--text-2xs)/1.4 var(--font-mono);
+  letter-spacing: 0.06em;
 }
 
-.card__body { display: flex; flex-direction: column; gap: var(--space-2xs); flex: 1 1 auto; padding: var(--space-sm); }
+.card__pick {
+  position: absolute;
+  inset-block-start: var(--space-xs);
+  inset-inline-end: var(--space-xs);
+  z-index: var(--z-raised);
+  display: grid;
+  place-items: center;
+  inline-size: 24px;
+  block-size: 24px;
+  padding: 0;
+  border: var(--rule-hair) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper);
+  color: var(--color-faint);
+  cursor: pointer;
+  transition: background-color var(--dur-micro) var(--ease-out);
+}
+.card__pick svg { inline-size: 13px; block-size: 13px; }
+.card__pick:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.card__pick:active { background: var(--color-paper-4); }
+.card__pick[aria-pressed="true"] {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-ink);
+}
+.card__pick:disabled { opacity: 0.55; cursor: not-allowed; }
 
+.card__body { display: flex; flex-direction: column; gap: var(--space-2xs); padding: var(--space-sm); flex: 1 1 auto; }
 .card__title {
-  margin: 0;
   font-size: var(--text-sm);
   font-weight: var(--weight-mid);
-  line-height: 1.35;
+  letter-spacing: -0.01em;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-
-.card__meta { display: flex; gap: var(--space-xs); color: var(--color-faint); font-family: var(--font-display); font-size: var(--text-2xs); }
-.card__tags { color: var(--color-neutral); font-size: var(--text-2xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card__act { margin-top: auto; padding-top: var(--space-2xs); display: flex; gap: var(--space-2xs); }
+.card__meta { display: flex; gap: var(--space-sm); font-size: var(--text-2xs); color: var(--color-faint); }
+.card__tags {
+  font-size: var(--text-2xs);
+  color: var(--color-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card__act { display: flex; gap: var(--space-2xs); margin-top: var(--space-2xs); }
 .card__act .btn { flex: 1 1 auto; }
 
-.empty { padding: var(--space-2xl) 0; color: var(--color-faint); text-align: center; font-family: var(--font-display); font-size: var(--text-sm); }
+.empty { color: var(--color-faint); font-size: var(--text-sm); padding-block: var(--space-xl); }
+.more { display: flex; justify-content: center; margin-top: var(--space-lg); }
 
-.more { display: flex; justify-content: center; padding-top: var(--space-xl); }
+/* ── installed rows ───────────────────────────────────────────── */
+.warnbar {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-start;
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+  border: var(--rule-hair) solid var(--color-danger-soft);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+}
+.warnbar[hidden] { display: none; }
+.warnbar svg { flex: none; inline-size: 16px; block-size: 16px; color: var(--color-danger); margin-top: 2px; }
 
-/* ─── installed table ────────────────────────────────────────────── */
-
-.rows { display: flex; flex-direction: column; border: var(--rule-hair) solid var(--color-rule-soft); border-radius: var(--radius-md); overflow: hidden; }
+.rows { border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-md); overflow: hidden; }
+.rows:empty { display: none; }
 
 .row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
   align-items: center;
-  gap: var(--space-md);
+  gap: var(--space-sm);
+  min-block-size: var(--row-h);
   padding: var(--space-xs) var(--space-sm);
-  border-bottom: var(--rule-hair) solid var(--color-rule-soft);
+  border-bottom: var(--rule-hair) solid var(--color-rule);
+  transition: background-color var(--dur-micro) var(--ease-out);
 }
-
 .row:last-child { border-bottom: 0; }
 .row:hover { background: var(--color-paper-2); }
-.row__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
-.row__dim { color: var(--color-faint); font-family: var(--font-display); font-size: var(--text-xs); }
-.row__warn { color: var(--color-danger); font-family: var(--font-display); font-size: var(--text-xs); }
+.row__name { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
+.row__folder { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--color-faint); }
+.row__size { font-size: var(--text-2xs); color: var(--color-faint); }
+.row__note { font-size: var(--text-2xs); color: var(--color-faint); white-space: nowrap; }
 
-.warnbar {
-  margin: 0 0 var(--space-md);
-  padding: var(--space-xs) var(--space-sm);
-  border: var(--rule-hair) solid var(--color-danger-dim);
-  border-radius: var(--radius-sm);
-  color: var(--color-danger);
-  font-family: var(--font-display);
-  font-size: var(--text-xs);
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: 1px var(--space-xs);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  font: var(--weight-mid) var(--text-2xs)/1.5 var(--font-mono);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: var(--color-faint);
 }
+.pill::before { content: ""; inline-size: 5px; block-size: 5px; border-radius: 50%; background: currentColor; }
+.pill--on  { color: var(--color-accent); border-color: var(--color-accent-dim); }
+.pill--off { color: var(--color-neutral); }
+.pill--bad { color: var(--color-danger); border-color: var(--color-danger-soft); }
 
-.sub { margin: var(--space-xl) 0 var(--space-sm); font-size: var(--text-sm); font-weight: var(--weight-mid); color: var(--color-neutral); }
+.subhead { display: flex; align-items: baseline; gap: var(--space-xs); margin: var(--space-xl) 0 var(--space-xs); }
+.subhead[hidden] { display: none; }
+.subhead p { margin: 0; font-size: var(--text-xs); color: var(--color-faint); }
 
+/* ── bisect ───────────────────────────────────────────────────── */
 .panel {
-  max-width: 46rem;
-  padding: var(--space-md);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-lg);
   background: var(--color-paper-2);
-  border: var(--rule-hair) solid var(--color-rule-soft);
-  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+  max-inline-size: 72ch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }
+.panel p { margin: 0; font-size: var(--text-sm); color: var(--color-muted); }
+.panel__hit { font-family: var(--font-display); font-size: var(--text-xl); color: var(--color-ink); }
+.panel__hit b { color: var(--color-accent); }
+.panel__row { display: flex; gap: var(--space-xs); flex-wrap: wrap; align-items: center; }
 
-.panel__title { margin: 0 0 var(--space-2xs); font-size: var(--text-lg); font-weight: var(--weight-bold); }
-.panel__note { margin: 0 0 var(--space-md); color: var(--color-muted); font-size: var(--text-sm); }
-.panel__row { display: flex; flex-wrap: wrap; gap: var(--space-xs); margin-top: var(--space-md); }
-.panel__stat { margin: 0 0 var(--space-xs); font-family: var(--font-display); font-size: var(--text-xs); color: var(--color-faint); }
-.panel__hit { padding: var(--space-sm); border: var(--rule-hair) solid var(--color-accent); border-radius: var(--radius-sm); font-size: var(--text-base); }
+.steps { display: flex; gap: var(--space-xs); align-items: center; }
+.steps span {
+  block-size: 3px;
+  flex: 1 1 auto;
+  border-radius: var(--radius-pill);
+  background: var(--color-paper-4);
+}
+.steps span[data-done="1"] { background: var(--color-accent); }
 
-.split { display: grid; gap: var(--space-md); grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
-.split h3 { margin: 0 0 var(--space-2xs); font-family: var(--font-display); font-size: var(--text-2xs); letter-spacing: 0.04em; color: var(--color-faint); }
-.split ul { margin: 0; padding-left: var(--space-md); font-size: var(--text-sm); color: var(--color-muted); }
-
-.pill { padding: var(--space-3xs) var(--space-2xs); border-radius: var(--radius-pill); font-family: var(--font-display); font-size: var(--text-2xs); }
-.pill--on { color: var(--color-accent); border: var(--rule-hair) solid var(--color-accent-dim); }
-.pill--off { color: var(--color-faint); border: var(--rule-hair) solid var(--color-rule); }
-.pill--bad { color: var(--color-danger); border: var(--rule-hair) solid var(--color-danger-dim); }
-
-/* ─── dialog ─────────────────────────────────────────────────────── */
-
-dialog {
-  width: min(46rem, 92vw);
-  max-height: 88vh;
-  padding: 0;
-  background: var(--color-paper-2);
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: var(--space-md); }
+.split section {
   border: var(--rule-hair) solid var(--color-rule);
   border-radius: var(--radius-md);
-  color: var(--color-ink);
+  padding: var(--space-sm);
+  background: var(--color-paper);
 }
+.split ul { margin: var(--space-xs) 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-3xs); }
+.split li { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--color-muted); overflow-wrap: anywhere; }
 
-dialog::backdrop { background: oklch(0% 0 0 / 0.65); }
+/* ── detail drawer ────────────────────────────────────────────── */
+.sheet {
+  margin: 0 0 0 auto;
+  inline-size: min(var(--drawer-w), 100vw);
+  max-inline-size: 100vw;
+  block-size: 100%;
+  max-block-size: 100%;
+  padding: 0;
+  border: 0;
+  border-inline-start: var(--rule-hair) solid var(--color-rule-strong);
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  z-index: var(--z-drawer);
+}
+.sheet::backdrop { background: oklch(8% 0.01 258 / 0.6); }
+.sheet[open] { animation: drawer-in var(--dur-short) var(--ease-out); }
+@keyframes drawer-in { from { transform: translateX(16px); opacity: 0; } }
 
-.sheet { display: flex; flex-direction: column; max-height: 88vh; }
-.sheet__shot { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--color-paper-3); }
-.sheet__body { padding: var(--space-md); overflow-y: auto; }
-.sheet__title { margin: 0 0 var(--space-2xs); font-size: var(--text-xl); font-weight: var(--weight-bold); line-height: 1.2; }
-.sheet__meta { margin: 0 0 var(--space-md); color: var(--color-faint); font-family: var(--font-display); font-size: var(--text-xs); }
-.sheet__desc { margin: 0; white-space: pre-wrap; color: var(--color-muted); font-size: var(--text-sm); }
-.sheet__foot { display: flex; gap: var(--space-xs); padding: var(--space-sm) var(--space-md); border-top: var(--rule-hair) solid var(--color-rule-soft); }
-.sheet__foot .btn:first-child { margin-right: auto; }
+.sheet__inner { display: flex; flex-direction: column; block-size: 100%; }
+.sheet__top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: var(--rule-hair) solid var(--color-rule);
+}
+.sheet__top h2 { font-size: var(--text-lg); flex: 1 1 auto; }
+.sheet__scroll { overflow-y: auto; padding: var(--space-md); display: flex; flex-direction: column; gap: var(--space-md); }
+.sheet__shot { inline-size: 100%; border-radius: var(--radius-md); border: var(--rule-hair) solid var(--color-rule); display: block; }
+.sheet__shot:not([src]) { display: none; }
+.sheet__meta { font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--color-faint); line-height: 1.7; overflow-wrap: anywhere; }
+.sheet__req { display: flex; flex-direction: column; gap: var(--space-2xs); }
+.sheet__req div { display: flex; gap: var(--space-xs); align-items: baseline; font-size: var(--text-sm); }
+.sheet__req svg { flex: none; inline-size: 13px; block-size: 13px; }
+.sheet__desc { font-size: var(--text-sm); color: var(--color-muted); white-space: pre-wrap; overflow-wrap: anywhere; max-inline-size: 62ch; }
+.sheet__foot { margin-top: auto; display: flex; gap: var(--space-xs); padding: var(--space-md); border-top: var(--rule-hair) solid var(--color-rule); }
 
-/* ─── log toast ──────────────────────────────────────────────────── */
+.ok { color: var(--color-accent); }
+.bad { color: var(--color-danger); }
 
+/* ── status bar ───────────────────────────────────────────────── */
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding-inline: var(--space-md);
+  border-top: var(--rule-hair) solid var(--color-rule);
+  background: var(--color-paper-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--color-faint);
+  overflow: hidden;
+}
+.status span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status__note { margin-inline-start: auto; }
+
+/* ── log toast ────────────────────────────────────────────────── */
 .log {
   position: fixed;
-  right: var(--space-md);
-  bottom: var(--space-md);
+  inset-block-end: calc(var(--status-h) + var(--space-md));
+  inset-inline-end: var(--space-md);
   z-index: var(--z-toast);
-  width: min(28rem, calc(100vw - 2rem));
-  max-height: 40vh;
-  padding: var(--space-sm);
-  background: var(--color-paper-3);
-  border: var(--rule-hair) solid var(--color-rule);
-  border-radius: var(--radius-md);
-  font-family: var(--font-display);
-  font-size: var(--text-xs);
+  inline-size: min(460px, calc(100vw - var(--space-xl)));
+  max-block-size: 46vh;
   overflow-y: auto;
-  white-space: pre-wrap;
-}
-
-.log__line--bad { color: var(--color-danger); }
-.log__close { position: sticky; top: 0; float: right; }
-
-/* ─── footer ─────────────────────────────────────────────────────── */
-
-footer {
-  padding: var(--space-md) clamp(1rem, 3vw, 1.75rem);
-  border-top: var(--rule-hair) solid var(--color-rule-soft);
-  color: var(--color-faint);
-  font-family: var(--font-display);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--color-paper-3);
+  box-shadow: var(--ring-hair), var(--shadow-whisper);
+  font-family: var(--font-mono);
   font-size: var(--text-2xs);
-  line-height: 1.7;
+  line-height: 1.65;
+  animation: toast-in var(--dur-short) var(--ease-out);
 }
+@keyframes toast-in { from { transform: translateY(6px); opacity: 0; } }
+.log__line { color: var(--color-muted); overflow-wrap: anywhere; }
+.log__line--bad { color: var(--color-danger); }
+.log__close { position: absolute; inset-block-start: var(--space-2xs); inset-inline-end: var(--space-2xs); }
 
-.spin { display: inline-block; width: 0.7em; height: 0.7em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
-
-@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 60rem) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .rail {
+    border-right: 0;
+    border-bottom: var(--rule-hair) solid var(--color-rule);
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-md);
+    overflow-x: auto;
+  }
+  .rail__nav { flex-direction: row; }
+  .rail__paths, .queue__list { display: none; }
+  .rail__paths { margin: 0; }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  *, *::before, *::after {
+    animation-duration: 150ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 150ms !important;
+  }
+  .sheet[open] { animation: none; }
+  .log { animation: none; }
+  .spin { animation-duration: 900ms !important; animation-iteration-count: infinite !important; }
 }
 </style>
 </head>
 <body>
 
 <header class="bar">
-  <div class="brand"><span class="brand__mark"></span>pzmod<span class="brand__sub" id="brandSub"></span></div>
-
-  <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
-
-  <label class="search">
-    <svg class="search__icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
-      <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-    </svg>
-    <input id="q" type="search" placeholder="lọc thêm cho gọn (không bắt buộc)" autocomplete="off">
-  </label>
-
-  <button class="btn" id="tabBrowse" aria-pressed="true">Workshop</button>
-  <button class="btn" id="tabHave" aria-pressed="false">Đã cài <span id="haveCount" class="u-nums"></span></button>
-  <button class="btn" id="tabBisect" aria-pressed="false">Dò mod lỗi</button>
+  <div class="brand">
+    <span class="brand__mark">pzmod</span>
+    <span class="brand__sub" id="brandSub">· Project Zomboid</span>
+  </div>
+  <div class="bar__spacer"></div>
+  <div class="busy" id="busy"><span class="spin"></span><span id="busyText">đang chạy</span></div>
+  <button class="btn" id="updateAll">Cập nhật tất cả</button>
 </header>
 
-<div class="chips" id="chips"></div>
-
-<main>
-  <section id="viewBrowse">
-    <div class="grid" id="grid"></div>
-    <p class="empty" id="empty" hidden>Không có mod nào khớp.</p>
-    <div class="more"><button class="btn" id="more">Tải thêm</button></div>
-  </section>
-
-  <section id="viewHave" hidden>
-    <div style="display:flex;gap:var(--space-xs);margin-bottom:var(--space-md)">
-      <button class="btn btn--accent" id="updateAll">Cập nhật hết</button>
+<div class="shell">
+  <nav class="rail" aria-label="Khu vực">
+    <div class="rail__nav">
+      <button class="tab" id="tabBrowse" aria-current="page">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <rect x="2.5" y="2.5" width="6" height="6" rx="1.2"/><rect x="11.5" y="2.5" width="6" height="6" rx="1.2"/>
+          <rect x="2.5" y="11.5" width="6" height="6" rx="1.2"/><rect x="11.5" y="11.5" width="6" height="6" rx="1.2"/>
+        </svg>
+        Workshop
+      </button>
+      <button class="tab" id="tabHave">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 2.5 17.5 6.5 10 10.5 2.5 6.5Z"/><path d="M2.5 10 10 14 17.5 10"/><path d="M2.5 13.5 10 17.5 17.5 13.5"/>
+        </svg>
+        Đã cài
+        <span class="tab__count" id="haveCount"></span>
+      </button>
+      <button class="tab" id="tabBisect">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+          <path d="M10 17.5V11"/><path d="M10 11 4.5 6.5"/><path d="M10 11 15.5 6.5"/>
+          <circle cx="4.5" cy="4.5" r="2"/><circle cx="15.5" cy="4.5" r="2"/>
+        </svg>
+        Dò mod lỗi
+      </button>
     </div>
-    <p class="warnbar" id="missBar" hidden></p>
-    <div class="rows" id="rows"></div>
-    <p class="empty" id="haveEmpty" hidden>Chưa cài mod nào qua pzmod.</p>
-    <h2 class="sub" id="looseHead" hidden>Mod tự bỏ vào tay</h2>
-    <div class="rows" id="looseRows"></div>
-  </section>
 
-  <section id="viewBisect" hidden>
-    <div class="panel">
-      <h2 class="panel__title">Dò mod gây lỗi</h2>
-      <p class="panel__note">Chia đôi số mod đang bật, mỗi vòng chỉ bật một nửa. Vòng nào cũng vậy:
-        bấm nút bên dưới → mở game thử → quay lại trả lời <b>Vẫn lỗi</b> hay <b>Hết lỗi</b>.
-        Mỗi lần trả lời cắt một nửa, khoảng log2(n) vòng là ra thủ phạm.
-        <b>Dừng</b> trả mọi mod về đúng trạng thái bật/tắt ban đầu.</p>
-      <div id="bisectBody"></div>
+    <div class="queue" id="queue" hidden>
+      <p class="label">Hàng đợi cài</p>
+      <ul class="queue__list" id="queueList"></ul>
+      <p class="label" id="queueSum"></p>
+      <div class="queue__foot">
+        <button class="btn btn--accent" id="bulkGo">Cài</button>
+        <button class="btn btn--quiet" id="pickNone">Bỏ chọn</button>
+      </div>
     </div>
-  </section>
-</main>
 
-<div class="bulk" id="bulk" hidden>
-  <span class="bulk__count" id="bulkCount"></span>
-  <button class="btn" id="pickPage">Chọn hết</button>
-  <button class="btn" id="pickNone">Bỏ chọn</button>
-  <button class="btn btn--accent" id="bulkGo">Cài</button>
+    <div class="rail__paths">
+      <p class="label">Thư mục</p>
+      <span class="rail__path" id="pathMods" title=""></span>
+      <span class="rail__path" id="pathOff" title=""></span>
+    </div>
+  </nav>
+
+  <main class="main">
+    <!-- ── Workshop ─────────────────────────────────────────── -->
+    <section class="view" id="viewBrowse">
+      <div class="head">
+        <h2>Workshop</h2>
+        <p>Tải mod thẳng từ Steam Workshop bằng steamcmd, không cần đăng nhập. Đánh dấu nhiều mod rồi cài một lượt; mod bắt buộc được kéo về trước.</p>
+      </div>
+
+      <div class="toolbar">
+        <label class="field">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <circle cx="8.75" cy="8.75" r="5.25"/><path d="M12.6 12.6 16.5 16.5" stroke-linecap="round"/>
+          </svg>
+          <span class="u-sr" hidden>Tìm mod</span>
+          <input class="input" id="q" type="search" placeholder="Tìm mod trên Workshop" autocomplete="off">
+          <kbd>Ctrl K</kbd>
+        </label>
+        <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
+        <button class="btn btn--tall" id="pickPage">Chọn cả trang</button>
+      </div>
+
+      <div class="chips" id="chips" role="group" aria-label="Thẻ phân loại"></div>
+
+      <div class="grid" id="grid"></div>
+      <p class="empty" id="empty" hidden>Không có kết quả. Đổi từ khoá hoặc bỏ bớt thẻ.</p>
+      <div class="more"><button class="btn btn--tall" id="more">Tải thêm</button></div>
+    </section>
+
+    <!-- ── Installed ────────────────────────────────────────── -->
+    <section class="view" id="viewHave" hidden>
+      <div class="head">
+        <h2>Mod đã cài</h2>
+        <p>Bật/Tắt ở đây dời thư mục giữa <code>mods</code> và <code>mods_off</code>. Trong game vẫn phải tick mod ở màn hình Mods.</p>
+      </div>
+
+      <div class="warnbar" id="missBar" hidden>
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <path d="M10 3.5 18 17H2Z" stroke-linejoin="round"/><path d="M10 8.5v3.5"/><path d="M10 14.5h.01"/>
+        </svg>
+        <span id="missText"></span>
+      </div>
+
+      <div class="rows" id="rows"></div>
+      <p class="empty" id="haveEmpty" hidden>Chưa cài mod nào qua pzmod.</p>
+
+      <div class="subhead" id="looseHead" hidden>
+        <h3 class="label">Thư mục ngoài pzmod</h3>
+        <p>Chép tay hoặc do bản cài cũ để lại — vẫn bật/tắt được.</p>
+      </div>
+      <div class="rows" id="looseRows"></div>
+    </section>
+
+    <!-- ── Bisect ───────────────────────────────────────────── -->
+    <section class="view" id="viewBisect" hidden>
+      <div class="head">
+        <h2>Dò mod lỗi</h2>
+        <p>Chia đôi số mod đang bật, chạy game, trả lời còn lỗi hay hết. Mỗi vòng loại được một nửa, nên 64 mod chỉ mất 6 lần thử.</p>
+      </div>
+      <div class="panel" id="bisectBody"></div>
+    </section>
+  </main>
 </div>
 
-<footer id="foot"></footer>
+<footer class="status">
+  <span id="statGame"></span>
+  <span id="statCount"></span>
+  <span class="status__note" id="statNote"></span>
+</footer>
 
-<dialog id="sheet"><div class="sheet">
-  <img class="sheet__shot" id="sheetShot" alt="">
-  <div class="sheet__body">
-    <h2 class="sheet__title" id="sheetTitle"></h2>
-    <p class="sheet__meta u-nums" id="sheetMeta"></p>
-    <p class="sheet__desc" id="sheetDesc"></p>
+<dialog class="sheet" id="sheet" aria-label="Chi tiết mod">
+  <div class="sheet__inner">
+    <div class="sheet__top">
+      <h2 id="sheetTitle">đang tải…</h2>
+      <a class="btn" id="sheetLink" href="#" target="_blank" rel="noreferrer">Steam</a>
+      <button class="btn btn--quiet" id="sheetClose" aria-label="Đóng">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <path d="M5 5 15 15M15 5 5 15"/>
+        </svg>
+      </button>
+    </div>
+    <div class="sheet__scroll">
+      <img class="sheet__shot" id="sheetShot" alt="">
+      <p class="sheet__meta" id="sheetMeta"></p>
+      <div class="sheet__req" id="sheetReq"></div>
+      <p class="sheet__desc" id="sheetDesc"></p>
+    </div>
+    <div class="sheet__foot">
+      <button class="btn btn--accent btn--tall btn--wide" id="sheetInstall">Cài</button>
+    </div>
   </div>
-  <div class="sheet__foot">
-    <button class="btn" id="sheetClose">Đóng</button>
-    <a class="btn" id="sheetLink" target="_blank" rel="noopener">Mở trên Steam</a>
-    <button class="btn btn--accent" id="sheetInstall">Cài</button>
-  </div>
-</div></dialog>
+</dialog>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const state = { installed: {}, sorts: {}, tags: [], sort: "trend", tag: "", q: "", page: 1, busy: false,
+  loose: [], missing: [],
   picked: new Map(),   // id -> {title,size}, sống qua mọi lần đổi tag/trang
-  seen: new Map() };   // id -> item, để thanh gom biết tên và dung lượng
+  seen: new Map() };   // id -> item, để hàng đợi biết tên và dung lượng
 
 const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
 const NUM = (n) => (n || 0).toLocaleString("vi-VN");
 const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const ICON = {
+  check: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10.5 8 14.5 16 6"/></svg>',
+  cross: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 5 15 15M15 5 5 15"/></svg>',
+};
 
 async function api(path, body) {
   const r = await fetch(path, body ? {
@@ -538,6 +835,11 @@ async function api(path, body) {
   const data = await r.json();
   if (data.error && !data.log) throw new Error(data.error);
   return data;
+}
+
+function busy(on, text) {
+  $("busy").dataset.on = on ? "1" : "0";
+  if (text) $("busyText").textContent = text;
 }
 
 /* ── log toast ────────────────────────────────────────────────── */
@@ -551,32 +853,30 @@ function showLog(res) {
     document.body.appendChild(box);
   }
   const lines = (res.log || []).concat(res.error ? ["ERROR: " + res.error] : []);
-  box.innerHTML = '<button class="btn log__close" onclick="this.parentNode.remove()">×</button>' +
+  box.innerHTML = `<button class="btn btn--quiet log__close" onclick="this.parentNode.remove()" aria-label="Đóng">${ICON.cross}</button>` +
     lines.map((l) => `<div class="log__line${/^\s*(!|ERROR)/.test(l) ? " log__line--bad" : ""}">${esc(l)}</div>`).join("");
-  if (res.ok) setTimeout(() => box.remove(), 6000);
+  $("statNote").textContent = lines.length ? lines[lines.length - 1] : "";
+  if (res.ok) setTimeout(() => { if (box.isConnected) box.remove(); }, 6000);
 }
 
-/* ── rendering ────────────────────────────────────────────────── */
+/* ── workshop grid ────────────────────────────────────────────── */
 function actions(it) {
-  const has = state.installed[it.id];
-  return has
+  return state.installed[it.id]
     ? `<button class="btn" data-act="update" data-id="${it.id}">Cập nhật</button>
        <button class="btn btn--danger" data-act="remove" data-id="${it.id}">Gỡ</button>`
-    : `<button class="btn btn--accent btn--wide" data-act="install" data-id="${it.id}">Cài</button>`;
+    : `<button class="btn btn--go btn--wide" data-act="install" data-id="${it.id}">Cài</button>`;
 }
 
 function cardHTML(it) {
   const has = state.installed[it.id] ? "1" : "0";
-  const shot = it.preview
-    ? `<img src="${esc(it.preview)}" alt="" loading="lazy">`
-    : "";
   state.seen.set(it.id, it);
-  const pick = state.picked.has(it.id) ? "true" : "false";
-  return `<article class="card" data-installed="${has}" data-picked="${pick === "true" ? 1 : 0}" data-id="${it.id}">
+  const pick = state.picked.has(it.id);
+  return `<article class="card" data-installed="${has}" data-picked="${pick ? 1 : 0}" data-id="${it.id}">
     <button class="card__pick" data-act="pick" data-id="${it.id}" aria-pressed="${pick}"
-            title="Đánh dấu để cài hàng loạt" aria-label="Đánh dấu ${esc(it.title)}">✓</button>
+            title="Đánh dấu để cài hàng loạt" aria-label="Đánh dấu ${esc(it.title)}">${ICON.check}</button>
     <button class="card__shot" data-act="open" data-id="${it.id}" title="${esc(it.title)}">
-      ${has === "1" ? '<span class="card__flag">ĐÃ CÀI</span>' : ""}${shot}
+      ${has === "1" ? '<span class="card__flag">ĐÃ CÀI</span>' : ""}
+      ${it.preview ? `<img src="${esc(it.preview)}" alt="" loading="lazy">` : ""}
     </button>
     <div class="card__body">
       <h3 class="card__title">${esc(it.title)}</h3>
@@ -631,20 +931,22 @@ function refreshCards() {
     if (has && !flag) card.querySelector(".card__shot").insertAdjacentHTML("afterbegin", '<span class="card__flag">ĐÃ CÀI</span>');
     if (!has && flag) flag.remove();
   });
-  renderBulk();   // quét trên có thể đã bỏ tick mấy mod vừa cài kèm
+  renderQueue();
 }
 
+/* ── installed rows ───────────────────────────────────────────── */
 const STATUS = {
-  enabled: `<span class="pill pill--on">đang bật</span>`,
-  disabled: `<span class="pill pill--off">đã tắt</span>`,
-  missing: `<span class="pill pill--bad">thiếu thư mục</span>`,
-  collision: `<span class="pill pill--bad">trùng ở cả 2 nơi</span>`,
-  invalid: `<span class="pill pill--bad">tên hỏng</span>`,
+  enabled:   ['pill--on',  'đang bật'],
+  disabled:  ['pill--off', 'đã tắt'],
+  missing:   ['pill--bad', 'thiếu thư mục'],
+  collision: ['pill--bad', 'trùng ở cả 2 nơi'],
+  invalid:   ['pill--bad', 'tên hỏng'],
 };
 
 // Bật/tắt tác động lên THƯ MỤC mod, nên mỗi thư mục một dòng — một item workshop
 // có thể đẻ ra vài thư mục, và mod Yang tự chép tay cũng phải bật tắt được.
 function folderRow(f, id, title, size) {
+  const [cls, word] = STATUS[f.status] || ['pill--bad', f.status];
   const toggle = f.status === "enabled"
     ? `<button class="btn" data-act="disable" data-folder="${esc(f.name)}">Tắt</button>`
     : f.status === "disabled"
@@ -653,11 +955,11 @@ function folderRow(f, id, title, size) {
   const own = id
     ? `<button class="btn" data-act="open" data-id="${id}">Xem</button>
        <button class="btn btn--danger" data-act="remove" data-id="${id}">Gỡ</button>`
-    : `<span class="row__dim">ngoài pzmod</span>`;
+    : `<span class="row__note">ngoài pzmod</span><span></span>`;
   return `<div class="row">
-    <div class="row__name" title="${esc(f.name)}">${esc(title)}<span class="row__dim"> · ${esc(f.name)}</span></div>
-    <div class="row__dim u-nums">${size ? KB(size) : ""}</div>
-    <div>${STATUS[f.status] || esc(f.status)}</div>
+    <div class="row__name" title="${esc(f.name)}">${esc(title)}<span class="row__folder"> · ${esc(f.name)}</span></div>
+    <div class="row__size u-nums">${size ? KB(size) : ""}</div>
+    <div><span class="pill ${cls}">${esc(word)}</span></div>
     ${toggle}
     ${own}
   </div>`;
@@ -665,7 +967,7 @@ function folderRow(f, id, title, size) {
 
 function renderHave() {
   const list = Object.entries(state.installed).sort((a, b) => a[1].title.localeCompare(b[1].title));
-  $("haveCount").textContent = list.length ? `(${list.length})` : "";
+  $("haveCount").textContent = list.length || "";
   $("haveEmpty").hidden = list.length > 0;
   $("rows").innerHTML = list.map(([id, e]) => {
     const folders = e.folders && e.folders.length ? e.folders : [{ name: "(không rõ)", status: "missing" }];
@@ -674,7 +976,7 @@ function renderHave() {
 
   const miss = state.missing || [];
   $("missBar").hidden = miss.length === 0;
-  $("missBar").textContent = miss.length
+  $("missText").textContent = miss.length
     ? `Thiếu mod bắt buộc: ${miss.join(", ")} — mod cần chúng sẽ không chạy. Tìm trên Workshop rồi cài thêm.`
     : "";
 
@@ -686,31 +988,43 @@ function renderHave() {
 
 /* ── dò mod lỗi ───────────────────────────────────────────────── */
 function bisectHTML(b) {
-  if (!b.ready) return `<p class="row__warn">${esc(b.error || "không dùng được")}</p>`;
+  if (!b.ready) return `<p class="bad">${esc(b.error || "không dùng được")}</p>`;
+
   if (b.suspect) {
     return `<p class="panel__hit">Thủ phạm: <b>${esc(b.suspect)}</b></p>
-      <p class="panel__stat">Gỡ hoặc cứ để tắt mod này. Bấm Dừng để trả các mod khác về như cũ.</p>
-      <div class="panel__row"><button class="btn btn--accent" data-bis="stop">Dừng &amp; khôi phục</button></div>`;
+      <p>Gỡ hẳn hoặc cứ để mod này tắt. Bấm Dừng để trả các mod khác về đúng như trước khi dò.</p>
+      <div class="panel__row"><button class="btn btn--accent btn--tall" data-bis="stop">Dừng &amp; khôi phục</button></div>`;
   }
+
   if (!b.running) {
     const n = (b.enabled_now || []).length;
-    return `<p class="panel__stat">${n} mod đang bật. Bisect chỉ đụng vào số mod này; mod đang tắt sẵn để nguyên.</p>
-      <div class="panel__row"><button class="btn btn--accent" data-bis="start" ${n < 2 ? "disabled" : ""}>Bắt đầu dò</button></div>
-      ${n < 2 ? `<p class="panel__stat">Cần ít nhất 2 mod đang bật.</p>` : ""}`;
+    const rounds = n > 1 ? Math.ceil(Math.log2(n)) : 0;
+    return `<p>${n} mod đang bật. Bisect chỉ đụng vào số mod này — mod đang tắt sẵn để nguyên.</p>
+      ${rounds ? `<p>Nhiều nhất <b>${rounds}</b> vòng là ra thủ phạm.</p>` : ""}
+      <div class="panel__row">
+        <button class="btn btn--accent btn--tall" data-bis="start" ${n < 2 ? "disabled" : ""}>Bắt đầu dò</button>
+        ${n < 2 ? `<span class="row__note">Cần ít nhất 2 mod đang bật.</span>` : ""}
+      </div>`;
   }
+
+  const total = (b.candidates || []).length;
   const li = (xs) => xs.length
     ? `<ul>${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
-    : `<p class="panel__stat">(trống)</p>`;
-  return `<p class="panel__stat">Vòng ${b.round} · còn ${b.candidates.length} mod nghi ngờ</p>
+    : `<p>(trống)</p>`;
+  const steps = Array.from({ length: Math.max(b.round, 1) + Math.max(total > 1 ? Math.ceil(Math.log2(total)) : 0, 1) - 1 },
+    (_, i) => `<span data-done="${i < b.round ? 1 : 0}"></span>`).join("");
+
+  return `<div class="steps" aria-hidden="true">${steps}</div>
+    <p>Vòng <b>${b.round}</b> · còn <b>${total}</b> mod nghi ngờ.</p>
     <div class="split">
-      <div><h3>ĐANG BẬT — vòng này thử</h3>${li(b.tested)}</div>
-      <div><h3>ĐANG TẮT</h3>${li(b.untested)}</div>
+      <section><p class="label">Đang bật — vòng này thử</p>${li(b.tested)}</section>
+      <section><p class="label">Đang tắt</p>${li(b.untested)}</section>
     </div>
-    <p class="panel__stat" style="margin-top:var(--space-md)">Mở game, làm lại đúng thao tác gây lỗi, rồi trả lời:</p>
+    <p>Mở game, làm lại đúng thao tác gây lỗi, rồi trả lời:</p>
     <div class="panel__row">
-      <button class="btn btn--danger" data-bis="bad">Vẫn lỗi</button>
-      <button class="btn btn--accent" data-bis="good">Hết lỗi</button>
-      <button class="btn" data-bis="stop">Dừng &amp; khôi phục</button>
+      <button class="btn btn--danger btn--tall" data-bis="bad">Vẫn lỗi</button>
+      <button class="btn btn--accent btn--tall" data-bis="good">Hết lỗi</button>
+      <button class="btn btn--tall" data-bis="stop">Dừng &amp; khôi phục</button>
     </div>`;
 }
 
@@ -718,14 +1032,15 @@ async function loadBisect() {
   try {
     $("bisectBody").innerHTML = bisectHTML(await api("/api/bisect"));
   } catch (e) {
-    $("bisectBody").innerHTML = `<p class="row__warn">${esc(e.message)}</p>`;
+    $("bisectBody").innerHTML = `<p class="bad">${esc(e.message)}</p>`;
   }
 }
 
 async function bisectDo(op, btn) {
   const label = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = `<span class="spin"></span>`;
+  btn.innerHTML = '<span class="spin"></span>';
+  busy(true, "đang dời thư mục mod");
   try {
     const res = await api("/api/bisect", { op });
     if (res.error) showLog({ ok: false, error: res.error });
@@ -735,59 +1050,76 @@ async function bisectDo(op, btn) {
     showLog({ ok: false, error: e.message });
     btn.disabled = false;
     btn.innerHTML = label;
+  } finally {
+    busy(false);
   }
 }
 
+/* ── state ────────────────────────────────────────────────────── */
 async function refreshState() {
   const s = await api("/api/state");
   Object.assign(state, { installed: s.installed, sorts: s.sorts, tags: s.tags });
   state.loose = s.loose || [];
   state.missing = s.missing || [];
-  $("brandSub").textContent = "· Project Zomboid";
-  $("foot").textContent = `game ${s.game}   ·   mods ${s.mods}   ·   tắt vào ${s.off}   ·   ${Object.keys(s.installed).length} mod do pzmod quản lý`
-    + "\nBật/Tắt ở đây = dời thư mục giữa mods và mods_off; trong game vẫn phải tick mod ở màn hình Mods.";
+
+  $("pathMods").textContent = s.mods;   $("pathMods").title = "bật: " + s.mods;
+  $("pathOff").textContent = s.off;     $("pathOff").title = "tắt: " + s.off;
+  $("statGame").textContent = "game " + s.game;
+  $("statGame").title = s.game;
+  const n = Object.keys(s.installed).length;
+  $("statCount").textContent = `${n} mod do pzmod quản lý · ${state.loose.length} thư mục ngoài`;
   renderHave();
 }
 
-/* ── detail sheet ─────────────────────────────────────────────── */
+/* ── detail drawer ────────────────────────────────────────────── */
 async function openSheet(id) {
   const dlg = $("sheet");
   $("sheetTitle").textContent = "đang tải…";
   $("sheetDesc").textContent = "";
   $("sheetMeta").textContent = "";
+  $("sheetReq").innerHTML = "";
   $("sheetShot").removeAttribute("src");
   $("sheetLink").href = "https://steamcommunity.com/sharedfiles/filedetails/?id=" + id;
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
+
   const d = await api("/api/detail?id=" + id);
   $("sheetTitle").textContent = d.title;
   if (d.preview) $("sheetShot").src = d.preview;
-  const bits = [NUM(d.subs) + " sub", NUM(d.favorited) + " fav", KB(d.size),
-    "cập nhật " + new Date(d.updated * 1000).toLocaleDateString("vi-VN"),
-    d.tags.join(" · ")];
-  if (d.children) bits.unshift(`COLLECTION — ${d.children} mod con`);
-  if (d.folder) bits.unshift("đã cài: mods\\" + d.folder);
-  $("sheetMeta").textContent = bits.filter(Boolean).join("   ·   ");
+
+  const bits = [];
+  if (d.children) bits.push(`COLLECTION — ${d.children} mod con`);
+  if (d.folder) bits.push("đã cài: mods\\" + d.folder);
+  bits.push(NUM(d.subs) + " sub", NUM(d.favorited) + " fav", KB(d.size),
+    "cập nhật " + new Date(d.updated * 1000).toLocaleDateString("vi-VN"));
   if (d.modids && d.modids.length) bits.push("mod id: " + d.modids.join(", "));
+  if (d.tags && d.tags.length) bits.push(d.tags.join(" · "));
   $("sheetMeta").textContent = bits.filter(Boolean).join("   ·   ");
-  const req = (d.required || []).map((r) =>
-    `${r.installed ? "\u2713" : "\u2717"} ${r.title}${r.installed ? "" : " (chưa cài)"}`);
-  const reqLine = d.req_blocked
-    ? "Mod bắt buộc: không đọc được trang workshop lúc này."
-    : (req.length ? "Mod bắt buộc:\n  " + req.join("\n  ") : "");
-  $("sheetDesc").textContent = (reqLine ? reqLine + "\n\n" : "") + (d.description || "(không có mô tả)");
+
+  const req = d.required || [];
+  $("sheetReq").innerHTML = d.req_blocked
+    ? `<div class="row__note">Mod bắt buộc: không đọc được trang workshop lúc này.</div>`
+    : (req.length
+      ? `<p class="label">Mod bắt buộc</p>` + req.map((r) =>
+          `<div><span class="${r.installed ? "ok" : "bad"}">${r.installed ? ICON.check : ICON.cross}</span>
+           <span>${esc(r.title)}${r.installed ? "" : " — chưa cài"}</span></div>`).join("")
+      : "");
+
+  $("sheetDesc").textContent = d.description || "(không có mô tả)";
   const btn = $("sheetInstall");
   btn.textContent = state.installed[id] ? "Cài lại" : (d.children ? `Cài cả ${d.children} mod` : "Cài");
   btn.dataset.id = id;
 }
 
-/* ── đánh dấu hàng loạt ───────────────────────────────────────── */
-function renderBulk() {
+/* ── hàng đợi cài ─────────────────────────────────────────────── */
+function renderQueue() {
   const n = state.picked.size;
-  $("bulk").hidden = n === 0;
+  $("queue").hidden = n === 0;
   if (!n) return;
   let bytes = 0;
   state.picked.forEach((m) => { bytes += m.size || 0; });
-  $("bulkCount").textContent = `đã chọn ${n} mod · ${KB(bytes)}`;
+  $("queueList").innerHTML = [...state.picked.entries()]
+    .map(([id, m]) => `<li class="queue__item"><span>${esc(m.title || id)}</span><b>${KB(m.size || 0)}</b></li>`).join("");
+  $("queueSum").textContent = `${n} mod · ${KB(bytes)}`;
   $("bulkGo").textContent = `Cài ${n} mod`;
 }
 
@@ -799,7 +1131,7 @@ function togglePick(id, btn) {
   if (btn) btn.setAttribute("aria-pressed", on ? "true" : "false");
   const card = btn && btn.closest(".card");
   if (card) card.dataset.picked = on ? "1" : "0";
-  renderBulk();
+  renderQueue();
 }
 
 async function bulkInstall() {
@@ -813,6 +1145,7 @@ async function bulkInstall() {
   let done = 0, failed = 0;
   for (const id of jobs) {
     const name = (state.picked.get(id) || {}).title || id;
+    busy(true, `đang cài ${done + 1}/${jobs.length}`);
     $("bulkGo").textContent = `Đang cài ${done + 1}/${jobs.length}…`;
     log.push(`=== ${name}`);
     try {
@@ -832,31 +1165,18 @@ async function bulkInstall() {
     await refreshState();
     refreshCards();
   }
+  busy(false);
   log.push(`--- xong ${jobs.length - failed}/${jobs.length}` + (failed ? `, hỏng ${failed} (vẫn còn đánh dấu)` : ""));
   showLog({ ok: failed === 0, log });
   bar.forEach((b) => { b.disabled = false; });
-  renderBulk();
+  renderQueue();
 }
-
-$("bulkGo").addEventListener("click", bulkInstall);
-$("pickNone").addEventListener("click", () => {
-  state.picked.clear();
-  document.querySelectorAll(".card__pick").forEach((b) => {
-    b.setAttribute("aria-pressed", "false");
-    b.closest(".card").dataset.picked = "0";
-  });
-  renderBulk();
-});
-$("pickPage").addEventListener("click", () => {
-  document.querySelectorAll('.card[data-installed="0"]').forEach((card) => {
-    if (!state.picked.has(card.dataset.id)) togglePick(card.dataset.id, card.querySelector(".card__pick"));
-  });
-});
 
 /* ── actions ──────────────────────────────────────────────────── */
 async function act(kind, id, btn) {
   const label = btn ? btn.innerHTML : "";
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>'; }
+  busy(true, kind === "remove" ? "đang gỡ" : "đang tải về");
   try {
     const res = kind === "remove"
       ? await api("/api/remove", { id })
@@ -867,7 +1187,22 @@ async function act(kind, id, btn) {
   } catch (e) {
     showLog({ ok: false, error: e.message });
   } finally {
+    busy(false);
     if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+  }
+}
+
+async function toggleFolder(kind, folder, btn) {
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>';
+  try {
+    showLog(await api("/api/" + kind, { folder }));
+    await refreshState();
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+    btn.disabled = false;
+    btn.innerHTML = label;
   }
 }
 
@@ -883,18 +1218,20 @@ document.addEventListener("click", (ev) => {
   act(kind, id, el);
 });
 
-async function toggleFolder(kind, folder, btn) {
-  btn.disabled = true;
-  btn.innerHTML = `<span class="spin"></span>`;
-  try {
-    showLog(await api("/api/" + kind, { folder }));
-    await refreshState();
-    renderHave();
-  } catch (e) {
-    showLog({ ok: false, error: e.message });
-    btn.disabled = false;
-  }
-}
+$("bulkGo").addEventListener("click", bulkInstall);
+$("pickNone").addEventListener("click", () => {
+  state.picked.clear();
+  document.querySelectorAll(".card__pick").forEach((b) => {
+    b.setAttribute("aria-pressed", "false");
+    b.closest(".card").dataset.picked = "0";
+  });
+  renderQueue();
+});
+$("pickPage").addEventListener("click", () => {
+  document.querySelectorAll('.card[data-installed="0"]').forEach((card) => {
+    if (!state.picked.has(card.dataset.id)) togglePick(card.dataset.id, card.querySelector(".card__pick"));
+  });
+});
 
 $("sheetInstall").addEventListener("click", (ev) => {
   const id = ev.currentTarget.dataset.id;
@@ -906,10 +1243,16 @@ $("more").addEventListener("click", () => load(false));
 
 $("updateAll").addEventListener("click", async (ev) => {
   ev.currentTarget.disabled = true;
+  busy(true, "đang cập nhật tất cả");
   try {
     showLog(await api("/api/update", {}));
     await refreshState();
-  } finally { ev.currentTarget.disabled = false; }
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+  } finally {
+    busy(false);
+    ev.currentTarget.disabled = false;
+  }
 });
 
 let typing;
@@ -919,18 +1262,31 @@ $("q").addEventListener("input", (ev) => {
   typing = setTimeout(() => load(true), 700);
 });
 
+/* ── tabs ─────────────────────────────────────────────────────── */
+const TABS = { browse: "tabBrowse", have: "tabHave", bisect: "tabBisect" };
 function setTab(which) {
   $("viewBrowse").hidden = which !== "browse";
   $("viewHave").hidden = which !== "have";
   $("viewBisect").hidden = which !== "bisect";
-  $("chips").hidden = which !== "browse";
-  $("tabBrowse").setAttribute("aria-pressed", String(which === "browse"));
-  $("tabHave").setAttribute("aria-pressed", String(which === "have"));
-  $("tabBisect").setAttribute("aria-pressed", String(which === "bisect"));
+  for (const [key, el] of Object.entries(TABS)) {
+    if (key === which) $(el).setAttribute("aria-current", "page");
+    else $(el).removeAttribute("aria-current");
+  }
+  $("queue").hidden = which !== "browse" || state.picked.size === 0;
+  document.querySelector(".main").scrollTop = 0;
 }
 $("tabBrowse").addEventListener("click", () => setTab("browse"));
 $("tabHave").addEventListener("click", () => { renderHave(); setTab("have"); });
 $("tabBisect").addEventListener("click", () => { setTab("bisect"); loadBisect(); });
+
+document.addEventListener("keydown", (ev) => {
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "k") {
+    ev.preventDefault();
+    setTab("browse");
+    $("q").focus();
+    $("q").select();
+  }
+});
 
 /* ── boot ─────────────────────────────────────────────────────── */
 (async () => {

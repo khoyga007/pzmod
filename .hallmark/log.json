@@ -1,0 +1,11 @@
+[
+  {
+    "date": "2026-08-29",
+    "macrostructure": "App Shell (deviation — closest catalog analogue Workbench)",
+    "theme": "custom",
+    "theme_axes": "dark / grotesk-sans / cool",
+    "vibe": "night-shift instrument panel for a modder",
+    "enrichment": "none (typography only)",
+    "brief": "pzmod — Project Zomboid workshop mod manager, Tauri + Python GUI share one ui.html"
+  }
+]

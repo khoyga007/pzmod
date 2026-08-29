@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import threading
 import webbrowser
@@ -219,6 +220,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.file("ui.html", "text/html; charset=utf-8")
             if url.path == "/tokens.css":
                 return self.file("tokens.css", "text/css; charset=utf-8")
+            if url.path == "/fonts.css":
+                return self.file("fonts.css", "text/css; charset=utf-8")
+            # Fonts are self-hosted so the app draws Vietnamese offline. Only bare
+            # .woff2 names out of fonts/ — the name never leaves that directory.
+            if url.path.startswith("/fonts/"):
+                name = url.path[len("/fonts/"):]
+                if not re.fullmatch(r"[A-Za-z0-9._-]+\.woff2", name):
+                    return self.send({"error": "font không hợp lệ"}, code=400)
+                return self.file(os.path.join("fonts", name), "font/woff2")
             if url.path == "/img":
                 try:
                     blob, ctype = fetch_img(one("u"))

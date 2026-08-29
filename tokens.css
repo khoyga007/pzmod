@@ -1,55 +1,71 @@
-/* Hallmark · genre: atmospheric · macrostructure: Index-First · theme: Midnight
- * enrichment: none (typography only) · nav: N13 inline search pill · footer: Ft4 dense colophon
- * axes: paper-band=dark · display-style=mono · accent-hue=warm
- * pre-emit critique: P5 H5 E4 S5 R4 V5
+/* Hallmark · genre: modern-minimal · macrostructure: App Shell (deviation — closest
+ * catalog analogue Workbench; landing-page apparatus does not apply to a tool window)
+ * theme: custom "Nightshift" · vibe: night-shift instrument panel for a modder
+ * paper oklch(15% 0.012 258) · accent oklch(66% 0.155 256) electric cobalt
+ * display Space Grotesk · body Inter · mono JetBrains Mono (all self-hosted)
+ * axes: paper-band=dark · display-style=grotesk-sans · accent-hue=cool
+ *   (differs from the ddmod/fmod/dspmod Midnight on display-style AND accent-hue)
+ * nav: left rail · footer: none — status bar (app chrome, not a page footer)
+ * contrast: pass (40-41) · tokens: pass (48) · chrome: pass (47) · honest: pass (46)
+ * pre-emit critique: P4 H5 E4 S5 R4 V5
  */
 
 :root {
-  /* Paper — dark, anchor hue 40 (warm grey). Never #000. */
-  --color-paper:     oklch(13.5% 0.008 40);
-  --color-paper-2:   oklch(17.5% 0.010 40);
-  --color-paper-3:   oklch(21.5% 0.011 40);
-  /* --color-rule bounds interactive controls, so it must clear 3:1 against every
-     surface a control can sit on - paper, the row-hover paper-2, and the button-hover
-     and toast paper-3. paper-3 is the binding one: 48% gave only 2.67 there.
-     --color-rule-soft only separates rows and may sit below it. */
-  --color-rule:      oklch(51%   0.010 40);
-  --color-rule-soft: oklch(26%   0.008 40);
+  /* Paper — cool engineered dark. Elevation goes UP in lightness, never down. */
+  --color-paper:     oklch(15%   0.012 258);
+  --color-paper-2:   oklch(18.5% 0.013 258);
+  --color-paper-3:   oklch(22%   0.014 258);
+  --color-paper-4:   oklch(26%   0.015 258);
 
-  /* Ink + neutrals — same anchor, tinted warm. Every tier clears 4.5:1 on paper,
-     including --color-faint, which carries placeholder and helper text. */
-  --color-ink:       oklch(94%   0.006 60);
-  --color-muted:     oklch(80%   0.007 45);
-  --color-neutral:   oklch(68%   0.008 40);
-  --color-faint:     oklch(60%   0.008 40);  /* clears 4.5:1 on paper-2 too (row hover, search pill) */
+  /* Rules. --color-rule-strong bounds interactive controls and must clear 3:1 on
+     paper-3 (the hover surface) — that is the binding case, and it needs L>=53%.
+     --color-rule only separates rows and may sit far below it. */
+  --color-rule:        oklch(30% 0.012 258);
+  --color-rule-strong: oklch(54% 0.014 258);
 
-  /* Accent — one warm signal. Chroma lowered + lightness lifted for dark mode. */
-  --color-accent:      oklch(72% 0.175 48);
-  --color-accent-dim:  oklch(50% 0.115 48);
-  --color-on-accent:   oklch(16% 0.012 45);
-  --color-focus:       oklch(78% 0.165 60);
+  /* Ink — same cool anchor. --color-faint carries helper text and still clears
+     4.5:1 on paper-2, so it may not go below L62%. */
+  --color-ink:     oklch(94% 0.008 258);
+  --color-muted:   oklch(78% 0.010 258);
+  --color-neutral: oklch(70% 0.011 258);
+  --color-faint:   oklch(62% 0.012 258);
 
-  /* Destructive — the only second chromatic hue. No green/red pairing anywhere. */
-  --color-danger:     oklch(64% 0.185 25);
-  --color-danger-dim: oklch(44% 0.110 25);
+  /* Accent — ONE electric cobalt signal. Dark-mode recipe: lightness up, chroma
+     down from the light-theme oklch(58% 0.20 256). Never a background flood. */
+  --color-accent:      oklch(66% 0.155 256);
+  --color-accent-soft: oklch(30% 0.070 256);
+  --color-accent-dim:  oklch(46% 0.100 256);
+  --color-accent-ink:  oklch(14% 0.020 258);
+  --color-focus:       oklch(74% 0.150 256);
 
-  /* Type */
-  --font-display: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
-  --font-mono:    var(--font-display);
-  --font-body:    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Noto Sans", sans-serif;
+  /* Destructive — the only second chromatic hue. Never red/green as the sole signal;
+     every state also carries a word. */
+  --color-danger:      oklch(66% 0.170 25);
+  --color-danger-soft: oklch(28% 0.070 25);
+  --color-danger-ink:  oklch(14% 0.020 25);
+
+  /* Type — 2+1: Space Grotesk display, Inter body, JetBrains Mono as the machine
+     register (paths, ids, counts, labels). Self-hosted; no network at runtime. */
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body:    "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, Consolas, monospace;
 
   --text-2xs:  0.6875rem;
   --text-xs:   0.75rem;
   --text-sm:   0.8125rem;
-  --text-base: 0.9375rem;
-  --text-lg:   1.0625rem;
-  --text-xl:   1.375rem;
+  --text-base: 0.875rem;
+  --text-lg:   1rem;
+  --text-xl:   1.25rem;
+  --text-2xl:  1.625rem;
 
-  --weight-body: 350;  /* light-on-dark optical compensation */
-  --weight-mid:  450;
+  --weight-body: 400;
+  --weight-mid:  500;
   --weight-bold: 600;
 
-  /* Space — 4 pt scale (3xs is the half-step badges and pills need) */
+  --lh-tight: 1.15;
+  --lh-body:  1.55;
+
+  /* Space — 4 pt scale */
   --space-3xs: 0.125rem;
   --space-2xs: 0.25rem;
   --space-xs:  0.5rem;
@@ -59,21 +75,37 @@
   --space-xl:  2rem;
   --space-2xl: 3rem;
 
-  /* Line, radius, depth */
-  --rule-hair:  1px;
-  --radius-sm:  4px;
-  --radius-md:  6px;
+  /* Line, radius — tight technical radii, drawn with a ruler */
+  --rule-hair:   1px;
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   10px;
   --radius-pill: 999px;
 
-  --z-base: 0;
-  --z-raised: 10;
-  --z-sticky: 20;
-  --z-toast: 40;
+  /* Chrome geometry — the app shell measures itself from these */
+  --bar-h:     52px;
+  --status-h:  30px;
+  --rail-w:    216px;
+  --drawer-w:  440px;
+  --control-h: 40px;
+  --row-h:     34px;
+
+  /* Depth — one whisper only. A drop shadow on dark reads as a glow, so the
+     drawer and toast use a hairline ring instead. */
+  --shadow-whisper: 0 1px 2px oklch(8% 0.01 258 / 0.55);
+  --ring-hair: inset 0 0 0 1px oklch(54% 0.014 258 / 0.5);
+
+  --z-base:    0;
+  --z-raised:  10;
+  --z-sticky:  200;
+  --z-sticky-nav: 300;
+  --z-drawer:  400;
+  --z-toast:   500;
 
   /* Motion */
-  --dur-instant: 0ms;
-  --dur-short: 120ms;
-  --dur-med: 200ms;
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long:  420ms;
   --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in:     cubic-bezier(0.7, 0, 0.84, 0);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
