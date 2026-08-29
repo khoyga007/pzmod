@@ -109,16 +109,26 @@ fn env_path(key: &str) -> Option<PathBuf> {
 /// 0 = no. ensure_dirs() creates empty mods/ + mods_off/, so an empty mods/ must
 /// never score, or pzmod would keep re-electing a folder it made up itself.
 fn pz_user_rank(dir: &Path) -> u8 {
-    if dir.join("options.ini").is_file()
-        || dir.join("console.txt").is_file()
-        || dir.join("Saves").is_dir()
-    {
+    if GAME_MARKERS.iter().any(|marker| dir.join(marker).exists()) {
         return 2;
     }
     let has_mods = fs::read_dir(dir.join("mods"))
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false);
     u8::from(has_mods)
+}
+
+const GAME_MARKERS: [&str; 3] = ["options.ini", "console.txt", "Saves"];
+
+/// Newest game-written marker in the folder — how recently the game actually ran
+/// there. Two folders can both be real (moving the user folder with -cachedir
+/// leaves the old one behind, files and all); the fresher one is the live one.
+fn pz_user_touched(dir: &Path) -> SystemTime {
+    GAME_MARKERS
+        .iter()
+        .filter_map(|marker| fs::metadata(dir.join(marker)).ok()?.modified().ok())
+        .max()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// dev.bat sources pz-paths.bat, so PZ_USER is always set while developing. An
@@ -143,14 +153,15 @@ fn detect_user_dir() -> Option<PathBuf> {
                 candidates.push(root.join("ProjectZomboid").join("Zomboid"));
                 candidates.push(root.join("Zomboid"));
             }
-            // Rank 2 everywhere before settling for a rank 1, and inside a rank
-            // keep candidate order (max_by_key would hand back the LAST match).
-            [2u8, 1].into_iter().find_map(|want| {
-                candidates
-                    .iter()
-                    .find(|dir| pz_user_rank(dir) == want)
-                    .cloned()
-            })
+            let mut ranked: Vec<(u8, SystemTime, PathBuf)> = candidates
+                .into_iter()
+                .map(|dir| (pz_user_rank(&dir), pz_user_touched(&dir), dir))
+                .filter(|(rank, _, _)| *rank > 0)
+                .collect();
+            // Best rank first, then the folder the game touched most recently;
+            // sort_by is stable, so a tie keeps candidate order.
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+            ranked.into_iter().next().map(|(_, _, dir)| dir)
         })
         .clone()
 }
@@ -2902,6 +2913,7 @@ mod tests {
         fs::create_dir_all(fresh.join("mods_off")).unwrap();
 
         assert_eq!(pz_user_rank(&game_written), 2);
+        assert!(pz_user_touched(&game_written) > pz_user_touched(&managed));
         assert_eq!(pz_user_rank(&managed), 1);
         assert_eq!(pz_user_rank(&fresh), 0);
         assert_eq!(pz_user_rank(&root.join("nope")), 0);

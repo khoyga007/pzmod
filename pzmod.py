@@ -35,15 +35,28 @@ APPID = "108600"
 GAME = os.environ.get("PZ_GAME", r"D:\ProjectZomboid")
 
 
+_GAME_MARKERS = ("options.ini", "console.txt", "Saves")
+
+
+def _pz_user_touched(path):
+    """Lan gan nhat game ghi vao thu muc nay. Doi cho bang -cachedir de lai thu
+    muc cu con nguyen file, nen cai nao moi hon la cai dang song."""
+    times = []
+    for marker in _GAME_MARKERS:
+        try:
+            times.append(os.path.getmtime(os.path.join(path, marker)))
+        except OSError:
+            pass
+    return max(times) if times else 0.0
+
+
 def _pz_user_rank(path):
     """2 = game da ghi vao day, 1 = chi co mods/ khong rong, 0 = khong phai.
 
     ensure_dirs() tao mods/ + mods_off/ rong, nen mot mods/ rong khong duoc tinh
     diem — neu khong pzmod se cu chon lai cai thu muc do chinh no bia ra.
     """
-    if (os.path.isfile(os.path.join(path, "options.ini"))
-            or os.path.isfile(os.path.join(path, "console.txt"))
-            or os.path.isdir(os.path.join(path, "Saves"))):
+    if any(os.path.exists(os.path.join(path, m)) for m in _GAME_MARKERS):
         return 2
     try:
         return 1 if os.listdir(os.path.join(path, "mods")) else 0
@@ -61,11 +74,14 @@ def _detect_user():
             continue
         candidates.append(os.path.join(root, "ProjectZomboid", "Zomboid"))
         candidates.append(os.path.join(root, "Zomboid"))
-    for want in (2, 1):
-        for path in candidates:
-            if _pz_user_rank(path) == want:
-                return path
-    return candidates[0]
+    ranked = [(_pz_user_rank(p), _pz_user_touched(p), i, p)
+              for i, p in enumerate(candidates)]
+    ranked = [r for r in ranked if r[0] > 0]
+    if not ranked:
+        return candidates[0]
+    # hang cao truoc, roi thu muc game vua dung gan nhat; hoa thi giu thu tu goc.
+    ranked.sort(key=lambda r: (-r[0], -r[1], r[2]))
+    return ranked[0][3]
 
 
 USER = os.environ.get("PZ_USER") or _detect_user()
