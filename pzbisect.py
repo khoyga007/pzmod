@@ -63,7 +63,7 @@ def _check_collision(mods_dir: str, off_dir: str, folder: str) -> None:
     """Refuse if a mod folder exists in both MODS and OFF."""
     p_on = os.path.join(mods_dir, folder)
     p_off = os.path.join(off_dir, folder)
-    if os.path.exists(p_on) and os.path.exists(p_off):
+    if os.path.isdir(p_on) and os.path.isdir(p_off):
         raise RuntimeError(f"Xung đột: mod '{folder}' tồn tại ở cả mods/ và mods_off/")
 
 
@@ -121,10 +121,10 @@ def enable(folder: str, user_dir: Optional[str] = None) -> bool:
     p_on = os.path.join(mods, folder)
     p_off = os.path.join(off, folder)
 
-    if os.path.exists(p_on):
+    if os.path.isdir(p_on):
         return True
 
-    if not os.path.exists(p_off):
+    if not os.path.isdir(p_off):
         raise FileNotFoundError(f"Không tìm thấy thư mục mod '{folder}' trong mods/ hoặc mods_off/")
 
     shutil.move(p_off, p_on)
@@ -144,10 +144,10 @@ def disable(folder: str, user_dir: Optional[str] = None) -> bool:
     p_on = os.path.join(mods, folder)
     p_off = os.path.join(off, folder)
 
-    if os.path.exists(p_off):
+    if os.path.isdir(p_off):
         return True
 
-    if not os.path.exists(p_on):
+    if not os.path.isdir(p_on):
         raise FileNotFoundError(f"Không tìm thấy thư mục mod '{folder}' trong mods/ hoặc mods_off/")
 
     shutil.move(p_on, p_off)
@@ -206,8 +206,16 @@ def bisect_start(names: Optional[List[str]] = None, user_dir: Optional[str] = No
     Snapshot the current enabled set as original_enabled.
     Requires >= 2 candidates.
     Splits candidates into two halves, enables left half, disables right half.
+    Refuses to start if an existing session is currently active (not done).
     """
     _, mods, off, state_file = get_paths(user_dir)
+
+    existing_st = _read_bisect_file(state_file)
+    if existing_st and not existing_st.get("done"):
+        raise RuntimeError(
+            "Đang có phiên bisect hoạt động. Hãy chạy 'pzbisect stop' trước khi bắt đầu phiên mới."
+        )
+
     _ensure_dirs(mods, off)
 
     installed = installed_folders(user_dir)
@@ -300,20 +308,39 @@ def bisect_mark(bad: bool, user_dir: Optional[str] = None) -> dict:
 
 
 def bisect_stop(user_dir: Optional[str] = None) -> dict:
-    """Stop the bisect session and restore the exact original layout."""
+    """Stop the bisect session and restore the exact original layout.
+
+    Guards:
+      - If state file is corrupted or missing original_enabled, raises RuntimeError and touches nothing.
+      - Only restores/disables folders in the bisect snapshot (original_enabled + candidates),
+        leaving newly installed mods untouched.
+    """
     _, _, _, state_file = get_paths(user_dir)
     st = _read_bisect_file(state_file)
 
     if not st:
         return {"stopped": False, "message": "Không có phiên bisect đang chạy", "done": False}
 
-    orig = set(st.get("original_enabled", []))
+    if "original_enabled" not in st or not isinstance(st.get("original_enabled"), list):
+        raise RuntimeError(
+            "File trạng thái .pzbisect.json bị hỏng (thiếu trường 'original_enabled'). "
+            "Dừng khôi phục để tránh tắt nhầm mod. Hãy khôi phục thủ công."
+        )
+
+    orig = set(st["original_enabled"])
+    snapshot_pool = (
+        orig
+        | set(st.get("candidates", []))
+        | set(st.get("current_tested", []))
+        | set(st.get("current_untested", []))
+    )
+
     installed = installed_folders(user_dir)
 
     for folder, is_enabled in installed:
         if folder in orig and not is_enabled:
             enable(folder, user_dir)
-        elif folder not in orig and is_enabled:
+        elif folder in snapshot_pool and folder not in orig and is_enabled:
             disable(folder, user_dir)
 
     if os.path.exists(state_file):
@@ -340,7 +367,7 @@ def selftest() -> bool:
         os.makedirs(off_dir, exist_ok=True)
 
         # 1. Test path guards
-        print("[1/6] Kiểm tra path traversal guard...")
+        print("[1/9] Kiểm tra path traversal guard...")
         for bad in ["../evil", "foo/bar", "foo\\bar", "..", "."]:
             try:
                 _check_folder_name(bad)
@@ -350,7 +377,7 @@ def selftest() -> bool:
         print("  -> PASS")
 
         # 2. Test name collision guard
-        print("[2/6] Kiểm tra name collision guard...")
+        print("[2/9] Kiểm tra name collision guard...")
         os.makedirs(os.path.join(mods_dir, "DupMod"), exist_ok=True)
         os.makedirs(os.path.join(off_dir, "DupMod"), exist_ok=True)
         try:
@@ -362,24 +389,36 @@ def selftest() -> bool:
         os.rmdir(os.path.join(mods_dir, "DupMod"))
         print("  -> PASS")
 
-        # 3. Test enable/disable idempotency
-        print("[3/6] Kiểm tra enable/disable idempotency...")
+        # 3. Test enable/disable idempotency + non-dir junk file guard
+        print("[3/9] Kiểm tra enable/disable idempotency và non-dir junk file...")
         os.makedirs(os.path.join(mods_dir, "ModA"), exist_ok=True)
         os.makedirs(os.path.join(off_dir, "ModB"), exist_ok=True)
+
+        # Create a non-dir file in mods
+        with open(os.path.join(mods_dir, "junk.txt"), "w") as f:
+            f.write("junk")
 
         assert installed_folders(user) == [("ModA", True), ("ModB", False)]
 
         enable("ModB", user)
-        assert os.path.exists(os.path.join(mods_dir, "ModB"))
+        assert os.path.isdir(os.path.join(mods_dir, "ModB"))
         assert not os.path.exists(os.path.join(off_dir, "ModB"))
         enable("ModB", user)
 
         disable("ModA", user)
-        assert os.path.exists(os.path.join(off_dir, "ModA"))
+        assert os.path.isdir(os.path.join(off_dir, "ModA"))
         assert not os.path.exists(os.path.join(mods_dir, "ModA"))
         disable("ModA", user)
 
         assert installed_folders(user) == [("ModA", False), ("ModB", True)]
+
+        # Trying to enable/disable non-dir file must raise FileNotFoundError
+        try:
+            enable("junk.txt", user)
+            raise AssertionError("Lỗi: Cho phép enable file thông thường")
+        except FileNotFoundError:
+            pass
+
         print("  -> PASS")
 
         shutil.rmtree(mods_dir)
@@ -388,7 +427,7 @@ def selftest() -> bool:
         os.makedirs(off_dir, exist_ok=True)
 
         # 4. Test bisect min candidates guard
-        print("[4/6] Kiểm tra bisect candidate count guard...")
+        print("[4/9] Kiểm tra bisect candidate count guard...")
         os.makedirs(os.path.join(mods_dir, "SoloMod"), exist_ok=True)
         try:
             bisect_start(user_dir=user)
@@ -399,7 +438,7 @@ def selftest() -> bool:
         print("  -> PASS")
 
         # 5. Full bisect simulation with 7 mods, culprit is Mod_4
-        print("[5/6] Giả lập toàn diện binary search bisect (7 mods, culprit = Mod_4)...")
+        print("[5/9] Giả lập toàn diện binary search bisect (7 mods, culprit = Mod_4)...")
         mod_names = [f"Mod_{i}" for i in range(7)]
         for m in mod_names:
             os.makedirs(os.path.join(mods_dir, m), exist_ok=True)
@@ -430,7 +469,7 @@ def selftest() -> bool:
         print("  -> PASS")
 
         # 6. Test bisect_stop mid-round layout restoration with partial enabled set
-        print("[6/6] Kiểm tra khôi phục layout gốc giữa chừng (original mix on/off)...")
+        print("[6/9] Kiểm tra khôi phục layout gốc giữa chừng (original mix on/off)...")
         for m in mod_names[:4]:
             enable(m, user)
         for m in mod_names[4:]:
@@ -443,6 +482,58 @@ def selftest() -> bool:
 
         now_on = {f for f, en in installed_folders(user) if en}
         assert now_on == expected_on, f"Layout khôi phục sai: {now_on} != {expected_on}"
+        print("  -> PASS")
+
+        # 7. Test bisect_start refusal when session already active (Fix 1)
+        print("[7/9] Kiểm tra từ chối bisect_start khi đang có phiên chạy (Fix 1)...")
+        st = bisect_start(user_dir=user)
+        try:
+            bisect_start(user_dir=user)
+            raise AssertionError("Lỗi: Cho phép bisect_start đè phiên đang chạy")
+        except RuntimeError:
+            pass
+        bisect_stop(user_dir=user)
+        print("  -> PASS")
+
+        # 8. Test bisect_stop fail-safe on corrupted state file (Fix 2)
+        print("[8/9] Kiểm tra bisect_stop an toàn khi state file thiếu original_enabled (Fix 2)...")
+        # Ensure some mods are enabled
+        for m in mod_names[:3]:
+            enable(m, user)
+        state_file = os.path.join(user, STATE_FILENAME)
+        # Write corrupted state file
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({"round": 1, "candidates": ["Mod_0", "Mod_1"]}, f)
+
+        try:
+            bisect_stop(user_dir=user)
+            raise AssertionError("Lỗi: bisect_stop không chặn khi state thiếu original_enabled")
+        except RuntimeError:
+            pass
+        # Ensure enabled mods were NOT disabled
+        assert set(mod_names[:3]).issubset({f for f, en in installed_folders(user) if en})
+        os.remove(state_file)
+        print("  -> PASS")
+
+        # 9. Test bisect_stop preserves newly installed mod during bisect session (Fix 3)
+        print("[9/9] Kiểm tra bisect_stop giữ nguyên mod cài mới giữa phiên bisect (Fix 3)...")
+        # Mod_0..Mod_2 ON, Mod_3..Mod_6 OFF
+        for m in mod_names[:3]:
+            enable(m, user)
+        for m in mod_names[3:]:
+            disable(m, user)
+
+        st = bisect_start(user_dir=user)
+        # User installs NewMod during bisect session into mods/
+        os.makedirs(os.path.join(mods_dir, "NewMod_MidWay"), exist_ok=True)
+
+        bisect_stop(user_dir=user)
+
+        # NewMod_MidWay MUST still be in mods/ (enabled)
+        assert os.path.isdir(os.path.join(mods_dir, "NewMod_MidWay")), "Lỗi: NewMod_MidWay bị tắt/xóa!"
+        now_enabled = {f for f, en in installed_folders(user) if en}
+        assert "NewMod_MidWay" in now_enabled
+        assert set(mod_names[:3]).issubset(now_enabled)
         print("  -> PASS")
 
     print("=== TẤT CẢ TESTCASE ĐỀU PASS HOÀN TOÀN ===")
