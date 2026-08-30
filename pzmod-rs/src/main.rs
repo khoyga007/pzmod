@@ -766,8 +766,19 @@ fn ids_after(html: &str, marker: &str) -> Vec<String> {
 const PINNED: &[&str] = &["2872282653"];
 
 fn extract_listing_ids(html: &str) -> Vec<String> {
-    ids_after(html, "sharedfiles/filedetails/?id=")
-        .into_iter()
+    const RESULTS_START: &str = r#"\\\"results\\\":["#;
+    const RESULTS_END: &str = r#"],\\\"next_cursor\\\""#;
+    const RESULT_ID: &str = r#"\\\"publishedfileid\\\":\\\""#;
+
+    let ids = html
+        .find(RESULTS_START)
+        .and_then(|start| {
+            let results = &html[start + RESULTS_START.len()..];
+            let end = results.find(RESULTS_END)?;
+            Some(ids_after(&results[..end], RESULT_ID))
+        })
+        .unwrap_or_else(|| ids_after(html, "sharedfiles/filedetails/?id="));
+    ids.into_iter()
         .filter(|id| !PINNED.contains(&id.as_str()))
         .collect()
 }
