@@ -1,5 +1,5 @@
 // pzmod — Project Zomboid workshop mod manager (Rust + Tauri 2).
-// All routes used by ui.html are native here; pzmod.py remains the CLI twin.
+// All routes used by ui.html are native here; this is the sole runtime lane.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
@@ -174,8 +174,8 @@ fn detect_user_dir() -> Option<PathBuf> {
         .clone()
 }
 
-/// (game, user, mods, mods_off) — same env overrides as pzmod.py so both halves
-/// of the port can be pointed at the throwaway tree in E:\pztest.
+/// (game, user, mods, mods_off) — env overrides keep dev and tests pointed at
+/// a throwaway tree instead of the live game profile.
 fn paths() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let game = env_path("PZ_GAME").unwrap_or_else(|| PathBuf::from(r"D:\ProjectZomboid"));
     let user = env_path("PZ_USER")
@@ -603,9 +603,9 @@ fn cached_page(url: &str, ttl: Duration, gap: Duration) -> Result<String, Blocke
         return Ok(html);
     }
     let _guard = ForegroundGuard::new();
-    // Steam chặn -> dùng lại bản cache cũ thay vì bó tay, y như lane Python
-    // (pzmod.py cached_page). Mục "Required Items" của một mod gần như không đổi,
-    // bản cũ vẫn dò được phụ thuộc; hết cách mới trả lỗi.
+    // Steam chặn -> dùng lại bản cache cũ thay vì bó tay. Mục "Required Items"
+    // của một mod gần như không đổi, nên bản cũ vẫn dò được phụ thuộc; hết cách
+    // mới trả lỗi.
     fetch_page(url, true, gap).or_else(|blocked| cached(url, None).ok_or(blocked))
 }
 
@@ -1144,11 +1144,24 @@ fn mod_roots(item: &Path) -> Result<Vec<ModRoot>, String> {
     entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
     let mut roots = Vec::new();
     for entry in entries.into_iter().filter(|entry| entry.path().is_dir()) {
-        let folder = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| "Tên thư mục mod không phải Unicode hợp lệ".to_string())?;
-        check_folder(&folder)?;
+        let folder = match entry.file_name().into_string() {
+            Ok(folder) => folder,
+            Err(_) => {
+                let warning = format!(
+                    "! bỏ qua thư mục mod có tên không phải Unicode hợp lệ: {}",
+                    entry.path().display()
+                );
+                eprintln!("{warning}");
+                progress_push(warning);
+                continue;
+            }
+        };
+        if let Err(error) = check_folder(&folder) {
+            let warning = format!("! bỏ qua thư mục mod {}: {error}", entry.path().display());
+            eprintln!("{warning}");
+            progress_push(warning);
+            continue;
+        }
         let mut infos = Vec::new();
         collect_modinfo(&entry.path(), &mut infos)?;
         if !infos.is_empty() {
@@ -1578,7 +1591,7 @@ struct State {
     periods: Vec<[&'static str; 2]>,
     tags: Vec<String>,
     bisect_ready: bool,
-    /// Routes still served by pzmod.py; the UI greys those tabs out.
+    /// Native routes advertised to the bridge; the UI greys out anything omitted.
     ported: Vec<&'static str>,
 }
 
@@ -3086,7 +3099,7 @@ mod tests {
     }
 
     #[test]
-    fn steamcmd_argv_matches_python_lane() {
+    fn steamcmd_argv_batches_requested_items() {
         let args: Vec<_> = steamcmd_args(&["123".into(), "456".into()])
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
@@ -3440,6 +3453,27 @@ mod tests {
         }
         // COM10 is not a device — only COM1..COM9 are.
         assert!(check_folder("COM10").is_ok());
+    }
+
+    #[test]
+    fn mod_roots_skips_invalid_folder_without_aborting_the_item() {
+        let item = test_root("invalid-workshop-folder");
+        let good = item.join("mods").join("GoodMod");
+        let bad = item.join("mods").join("Bad\u{FF0F}Mod");
+        fs::create_dir_all(&good).unwrap();
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(good.join("mod.info"), "id=GoodMod\n").unwrap();
+        fs::write(bad.join("mod.info"), "id=BadMod\n").unwrap();
+
+        let roots = mod_roots(&item).unwrap();
+        assert_eq!(
+            roots
+                .iter()
+                .map(|root| root.folder.as_str())
+                .collect::<Vec<_>>(),
+            ["GoodMod"]
+        );
+        fs::remove_dir_all(&item).ok();
     }
 
     #[test]
