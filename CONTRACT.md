@@ -14,6 +14,24 @@ Base: clone of `D:\Tools\DDMods` (ddmod). Read `ddmod.py` + `ddmod_gui.py` + `ui
 - Workshop tag vocabulary for PZ = `D:\ProjectZomboid\media\WorkshopTags.txt` (Build 40/41/42, Animals, Audio, Balance, Building, Clothing/Armor, Farming, Food, Framework, Hardmode, Interface, Items, Language/Translation, Literature, Map, Military, Misc, Models, Multiplayer, Pop Culture, Realistic, Silly/Fun, Skills, Textures, Traits, Vehicles, QoL, WIP, Weapons).
 - `C:\Users\Asus1\Zomboid` does NOT exist yet (game never launched). Create it on demand.
 
+## Authenticated Workshop browse
+
+Steam filters mature mods server-side for anonymous users. pzmod reads the
+`steamLoginSecure` value from `%LOCALAPPDATA%\pzmod\steam-cookie.txt` and sends
+it only to `steamcommunity.com`; the value must come from that domain, not
+`store.steampowered.com` (`aud: web:community`, not `aud: web:store`). Keep one
+trimmed value in the file, never commit or log it.
+
+The token expires and is bound to the egress IP used when Steam issued it.
+Recreate the file after expiry, a Steam logout, or a Warp/VPN IP change. A
+logged-out Workshop response is an authentication error rather than a valid
+partial listing. Cache keys are partitioned by whether authentication is
+configured so old anonymous pages cannot hide mature results.
+
+Acceptance case: an authenticated text search for `Tomb Player Body Overhaul`
+under appid `108600` includes Workshop item `3429790870`; its Required Items
+block resolves dependency `3431734923`.
+
 ## Paths (single source of truth: `paths()`, pzmod-rs/src/main.rs:179)
 
 | name | value |
