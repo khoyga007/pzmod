@@ -1,11 +1,16 @@
 /* bridge.js — làm cho ui.html chạy trong Tauri mà không phải sửa ui.html.
    ui.html gọi mọi thứ qua fetch("/api/..."), nên chỉ cần bắt fetch ở đây và
-   chuyển thành invoke(). Route nào chưa port thì trả lỗi rõ ràng, không im lặng. */
+   chuyển thành invoke(). Route thiếu trong ROUTES là BUG, không phải việc chưa
+   làm nốt: lane Python bị xoá 30/08/2026, không còn bản nào để lùi về. */
 (function () {
   var core = window.__TAURI__ && window.__TAURI__.core;
-  if (!core) return; // mở bằng trình duyệt thường -> để nguyên fetch của bản Python
+  // Không có Tauri = ai đó mở thẳng index.html bằng trình duyệt. Không còn
+  // server nào phục vụ /api/ nữa, nên để fetch nguyên trạng và cho nó fail lộ
+  // ra, hơn là giả vờ chạy được.
+  if (!core) return;
 
-  // /api/<x> -> tên #[tauri::command]. Thiếu ở đây = chưa port.
+  // /api/<x> -> tên #[tauri::command]. Thêm hoặc đổi tên lệnh trong main.rs mà
+  // quên bảng này = nút bấm chết. Sửa cùng commit, và cập nhật ROUTES.md.
   var ROUTES = {
     "/api/state": "state",
     "/api/enable": "enable",
@@ -21,7 +26,7 @@
     "/api/launch": "launch",
   };
 
-  var NOT_YET = "Chức năng này chưa port sang bản Rust. Dùng pzmod-gui.bat (bản Python) cho tới khi xong.";
+  var NO_CMD = "Lỗi nội bộ: giao diện gọi một route không có trong bản Rust: ";
 
   function reply(data) {
     return Promise.resolve({
@@ -39,7 +44,7 @@
 
     var path = url.split("?")[0];
     var cmd = ROUTES[path];
-    if (!cmd) return reply({ error: NOT_YET });
+    if (!cmd) return reply({ error: NO_CMD + path });
 
     var args = {};
     if (init && init.body) {

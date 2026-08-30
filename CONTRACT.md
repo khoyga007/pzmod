@@ -58,12 +58,22 @@ Celine and Ariel share `main.rs`. Split by block, not by file: Ariel owns the
 bisect functions and their tests, Celine owns the rest. Touching the other's
 block needs a word on the bridge first, same rule as a separate file.
 
-`pzmod-rs/ui/` IS A BUILD ARTIFACT. `sync-ui.py` generates `ui/index.html` from
-`ui.html` and `dev.bat` runs it before every `cargo run`. Never hand-edit
-anything under `pzmod-rs/ui/` — the next build overwrites it. `ui.html` at the
-repo root is the only UI source. (Claire got this wrong on 30/08/2026 and told
-Selica to port a fix into the generated file; it is written down here so nobody
-repeats it.)
+`pzmod-rs/ui/` is MOSTLY generated. `sync-ui.py` writes `index.html`,
+`tokens.css`, `fonts.css` and `fonts/` there from the repo root, and `dev.bat`
+runs it before every `cargo run` — hand-editing any of those is wasted work, the
+next build overwrites it. `ui.html` at the repo root is the only UI source.
+(Claire got this wrong on 30/08/2026 and told Selica to port a fix into the
+generated `index.html`; written down so nobody repeats it.)
+
+THE ONE EXCEPTION: `pzmod-rs/ui/bridge.js` is hand-written source that happens to
+live in that folder — `git ls-files pzmod-rs/ui/` returns it and nothing else.
+`sync-ui.py` only injects a `<script src="bridge.js">` tag; it never writes the
+file. Owner: **Selica**, as UI-side glue. It holds the `/api/<x>` -> command map,
+so adding or renaming a `#[tauri::command]` means updating that map and
+`ROUTES.md` **in the same commit** — a route with no map entry is a dead button
+that fails only at runtime, and no test catches it. (Claire's rule here first read
+"never hand-edit anything under `pzmod-rs/ui/`", which banned editing the one
+source file in there. Corrected 30/08/2026.)
 
 `sync-ui.py` and `fetch-fonts.py` stay Python. They are build tooling, not the
 retired lane.
