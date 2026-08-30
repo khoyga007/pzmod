@@ -241,10 +241,10 @@ h1, h2, h3 {
 .main { min-inline-size: 0; overflow-y: auto; }
 .view { padding: var(--space-lg) var(--space-lg) var(--space-2xl); }
 .view[hidden] { display: none; }
-.view--steam { min-block-size: 100%; display: flex; flex-direction: column; }
-.steam__toolbar { flex-wrap: nowrap; }
+.view--steam { min-block-size: 100%; block-size: 100%; box-sizing: border-box; padding: var(--space-md) var(--space-lg) var(--space-md); display: flex; flex-direction: column; overflow: hidden; }
+.steam__toolbar { flex-wrap: nowrap; flex-shrink: 0; }
 .steam__url { flex: 1 1 auto; min-inline-size: 12rem; padding-inline: var(--space-sm); font-family: var(--font-mono); font-size: var(--text-xs); }
-.steam__stage { position: relative; flex: 1 1 auto; min-block-size: 16rem; margin-top: var(--space-sm); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-md); background: var(--color-paper-2); overflow: hidden; }
+.steam__stage { position: relative; flex: 1 1 auto; min-block-size: 0; margin-top: var(--space-sm); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-md); background: var(--color-paper-2); overflow: hidden; }
 .steam__loading { display: grid; place-items: center; block-size: 100%; margin: 0; color: var(--color-faint); font-size: var(--text-sm); }
 @media (max-width: 760px) { .steam__toolbar { flex-wrap: wrap; } .steam__url { min-inline-size: 100%; order: 2; } }
 
@@ -805,17 +805,13 @@ h1, h2, h3 {
 
     <!-- ── Steam ────────────────────────────────────────────── -->
     <section class="view view--steam" id="viewSteam" hidden>
-      <div class="head">
-        <h2>Steam Workshop</h2>
-        <p>Duyệt Workshop, đọc bình luận và cài mod ngay từ trang đang xem.</p>
-      </div>
       <div class="toolbar steam__toolbar">
-        <button class="btn btn--tall" id="steamBack" title="Quay lại" disabled>←</button>
-        <button class="btn btn--tall" id="steamForward" title="Tiến tới" disabled>→</button>
-        <button class="btn btn--tall" id="steamHome" title="Trang Workshop" disabled>⌂</button>
-        <button class="btn btn--tall" id="steamReload" title="Tải lại" disabled>↻</button>
+        <button class="btn" id="steamBack" title="Quay lại" disabled>←</button>
+        <button class="btn" id="steamForward" title="Tiến tới" disabled>→</button>
+        <button class="btn" id="steamHome" title="Trang Workshop" disabled>⌂</button>
+        <button class="btn" id="steamReload" title="Tải lại" disabled>↻</button>
         <input class="input steam__url" id="steamUrl" type="url" placeholder="https://steamcommunity.com/..." autocomplete="off" disabled>
-        <button class="btn btn--accent btn--tall" id="steamInstall" title="Mở trang chi tiết mod trước" disabled>↓ Tải mod này</button>
+        <button class="btn btn--accent" id="steamInstall" title="Mở trang chi tiết mod trước" disabled>↓ Tải mod này</button>
       </div>
       <div class="steam__stage" id="steamStage"><p class="steam__loading" id="steamLoading">Đang tải Steam…</p></div>
     </section>
@@ -1506,7 +1502,7 @@ const SteamWebview = steamTauri.webview && steamTauri.webview.Webview;
 const steamWindow = steamTauri.window && steamTauri.window.getCurrentWindow && steamTauri.window.getCurrentWindow();
 const SteamPosition = steamTauri.dpi && steamTauri.dpi.PhysicalPosition;
 const SteamSize = steamTauri.dpi && steamTauri.dpi.PhysicalSize;
-const steam = { webview: null, ready: false, active: false, url: STEAM_HOME, poll: null, observer: null, timers: [] };
+const steam = { webview: null, pending: null, ready: false, active: false, url: STEAM_HOME, poll: null, observer: null, timers: [] };
 
 function steamItemId(url) {
   const hit = String(url || "").match(/(?:\?id=|filedetails\/\?id=|workshop\/content\/\d+\/)(\d+)/);
@@ -1568,30 +1564,55 @@ function setSteamVisibility(active) {
 }
 
 async function ensureSteamWebview() {
-  if (steam.webview) return;
+  if (steam.webview) return steam.webview;
+  if (steam.pending) return steam.pending;
   if (!SteamWebview || !steamWindow || !SteamPosition || !SteamSize) throw new Error("Bản Tauri này không có child webview");
-  const stale = await SteamWebview.getByLabel(STEAM_LABEL);
-  if (stale) await stale.close().catch(() => {});
-  const rect = $("steamStage").getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const webview = new SteamWebview(steamWindow, STEAM_LABEL, {
-    url: STEAM_HOME,
-    x: Math.round(rect.left * dpr), y: Math.round(rect.top * dpr),
-    width: Math.max(1, Math.round(rect.width * dpr)), height: Math.max(1, Math.round(rect.height * dpr)),
-  });
-  webview.once("tauri://created", () => {
-    steam.webview = webview;
-    steam.ready = true;
-    syncSteamControls();
-    if (steam.active) setSteamVisibility(true); else webview.hide().catch(() => {});
-    steam.observer = new ResizeObserver(() => syncSteamBounds().catch(() => {}));
-    steam.observer.observe($("steamStage"));
-    window.addEventListener("resize", scheduleSteamBounds);
-    scheduleSteamBounds();
-    startSteamPolling();
-    harvestSteamCookie();
-  });
-  webview.once("tauri://error", () => showLog({ ok: false, error: "Không tạo được tab Steam" }));
+
+  steam.pending = (async () => {
+    try {
+      const stale = await SteamWebview.getByLabel(STEAM_LABEL);
+      if (stale) await stale.close().catch(() => {});
+      const rect = $("steamStage").getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const webview = new SteamWebview(steamWindow, STEAM_LABEL, {
+        url: STEAM_HOME,
+        x: Math.round(rect.left * dpr), y: Math.round(rect.top * dpr),
+        width: Math.max(1, Math.round(rect.width * dpr)), height: Math.max(1, Math.round(rect.height * dpr)),
+      });
+
+      return await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error("Khởi tạo tab Steam quá thời gian (timeout)"));
+        }, 7000);
+
+        webview.once("tauri://created", () => {
+          clearTimeout(timer);
+          steam.webview = webview;
+          steam.ready = true;
+          syncSteamControls();
+          if (steam.active) setSteamVisibility(true); else webview.hide().catch(() => {});
+          steam.observer = new ResizeObserver(() => syncSteamBounds().catch(() => {}));
+          steam.observer.observe($("steamStage"));
+          window.addEventListener("resize", scheduleSteamBounds);
+          scheduleSteamBounds();
+          startSteamPolling();
+          harvestSteamCookie();
+          resolve(webview);
+        });
+
+        webview.once("tauri://error", (err) => {
+          clearTimeout(timer);
+          const msg = err && typeof err === "object" ? (err.payload || JSON.stringify(err)) : String(err || "Không tạo được tab Steam");
+          showLog({ ok: false, error: "Không tạo được tab Steam: " + msg });
+          reject(new Error("Không tạo được tab Steam: " + msg));
+        });
+      });
+    } finally {
+      steam.pending = null;
+    }
+  })();
+
+  return steam.pending;
 }
 
 async function navigateSteam(url) {
