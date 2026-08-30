@@ -24,8 +24,9 @@ Do not run `build.bat` / release builds unless Yang explicitly asks.
 | `GET /img?u=` | CDN proxy + allowlist | none needed | webview loads Steam CDN direct (`csp: null`) |
 | `GET /tokens.css` | file serve | none needed | shipped inside `ui/` |
 
-Unmapped routes return a "chưa port" error from `bridge.js`, so the Python GUI
-stays the working build until the table is full.
+Table is full and the Python lane is gone (Yang, 30/08/2026). The column headed
+`Python` is kept as history — those files no longer exist. `bridge.js` still errors
+on an unmapped route, which now means a bug, not a pending port.
 
 ## Ported invariants (do not drop)
 
@@ -33,7 +34,7 @@ stays the working build until the table is full.
 - both `mods/` and `mods_off/` holding the same name = refuse, never delete either.
 - toggle is idempotent; "already there" is success, not an error.
 - `isdir`, not `exists` — a stray file must not read as an installed mod.
-- `PZ_GAME` / `PZ_USER` env overrides, same defaults as `pzmod.py`.
+- `PZ_GAME` / `PZ_USER` env overrides; defaults `D:\ProjectZomboid` and `%USERPROFILE%\Zomboid`.
 
 ## Next
 
