@@ -355,6 +355,7 @@ fn steam_cookie() -> Option<String> {
 /// header gửi steamcommunity.com: không log, không trả về UI, không vào lỗi.
 fn remember_cookie(value: String) {
     if !usable_cookie(&value) {
+        steam_log("remember: giá trị không dùng được, bỏ");
         return;
     }
     let Ok(mut slot) = live_cookie().lock() else {
@@ -368,28 +369,96 @@ fn remember_cookie(value: String) {
             .parent()
             .is_some_and(|dir| fs::create_dir_all(dir).is_ok())
         {
-            let _ = fs::write(&path, &value);
+            match fs::write(&path, &value) {
+                Ok(()) => {
+                    let real = fs::canonicalize(&path)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| path.display().to_string());
+                    let localappdata =
+                        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "<unset>".to_owned());
+                    match fs::read(&path) {
+                        Ok(bytes) if bytes.len() == value.len() => steam_log(&format!(
+                            "remember: ghi {n} byte, đọc lại khớp; LOCALAPPDATA={localappdata}; file thật={real}",
+                            n = value.len(),
+                        )),
+                        Ok(bytes) => steam_log(&format!(
+                            "remember: CẢNH BÁO lệch — ghi {a} byte, đọc lại {b} byte; file thật={real}",
+                            a = value.len(),
+                            b = bytes.len(),
+                        )),
+                        Err(error) => steam_log(&format!(
+                            "remember: ghi xong nhưng đọc lại lỗi {error}; file thật={real}",
+                        )),
+                    }
+                }
+                Err(error) => steam_log(&format!("remember: ghi file lỗi: {error}")),
+            }
         }
     }
     *slot = Some(value);
 }
 
+/// Nhật ký chẩn đoán cho luồng cookie. Chỉ ghi ĐẾM và tên cookie, không bao giờ
+/// ghi giá trị: file này nằm cạnh chính token nên coi như đọc được bởi bất kỳ ai
+/// đọc được token.
+fn steam_log(line: &str) {
+    let Some(path) = steam_cookie_path().map(|path| path.with_file_name("steam-debug.log")) else {
+        return;
+    };
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{stamp} {line}");
+    }
+}
+
 /// WebView2 tự khoá nếu đọc cookie ngay trong event handler (wry#583), nên việc
-/// đọc bị đẩy hẳn sang thread khác.
-fn harvest_cookie(webview: tauri::WebviewWindow) {
+/// đọc bị đẩy sang thread khác. Chỉ đọc ở nhịp Finished: lúc Started thì Steam
+/// chưa kịp đặt cookie mới, và ở cửa sổ ẩn dựng trong setup() vòng lặp sự kiện
+/// còn chưa chạy nên gọi sớm là treo luôn thread đó.
+fn harvest_cookie(webview: tauri::WebviewWindow, event: tauri::webview::PageLoadEvent) {
+    if !matches!(event, tauri::webview::PageLoadEvent::Finished) {
+        return;
+    }
     thread::spawn(move || {
+        thread::sleep(Duration::from_millis(1200));
         let Ok(url) = "https://steamcommunity.com/".parse() else {
+            steam_log("harvest: URL hỏng");
             return;
         };
-        let Ok(cookies) = webview.cookies_for_url(url) else {
-            return;
+        let cookies = match webview.cookies_for_url(url) {
+            Ok(cookies) => cookies,
+            Err(error) => {
+                steam_log(&format!("harvest: cookies_for_url lỗi: {error}"));
+                return;
+            }
         };
-        if let Some(value) = cookies
+        let names: Vec<&str> = cookies.iter().map(|cookie| cookie.name()).collect();
+        steam_log(&format!(
+            "harvest: {} cookie [{}]",
+            cookies.len(),
+            names.join(",")
+        ));
+        match cookies
             .iter()
             .find(|cookie| cookie.name() == "steamLoginSecure")
             .map(|cookie| cookie.value().to_owned())
         {
-            remember_cookie(value);
+            Some(value) => {
+                let ok = usable_cookie(&value);
+                steam_log(&format!(
+                    "harvest: thấy steamLoginSecure {} ký tự, hợp lệ={ok}",
+                    value.len()
+                ));
+                remember_cookie(value);
+            }
+            None => steam_log("harvest: không có steamLoginSecure trong danh sách"),
         }
     });
 }
@@ -407,11 +476,12 @@ fn open_steam_window(app: &tauri::AppHandle, url: tauri::Url, visible: bool) -> 
         }
         return Ok(());
     }
+    steam_log(&format!("window: dựng mới, visible={visible}"));
     tauri::WebviewWindowBuilder::new(app, STEAM_WINDOW, tauri::WebviewUrl::External(url))
         .title("Steam Workshop")
         .inner_size(1180.0, 880.0)
         .visible(visible)
-        .on_page_load(|webview, _| harvest_cookie(webview))
+        .on_page_load(|webview, payload| harvest_cookie(webview, payload.event()))
         .build()
         .map(|_| ())
         .map_err(|e| format!("Không mở được cửa sổ Steam: {e}"))
