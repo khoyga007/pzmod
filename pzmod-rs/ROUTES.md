@@ -21,7 +21,12 @@ Do not run `build.bat` / release builds unless Yang explicitly asks.
 | `POST /api/bisect` | `pzbisect.bisect_*` | `bisect` | done |
 | `POST /api/prefetch` | `pzmod.prefetch()` background warm | `prefetch` | done |
 | `POST /api/launch` | `launch_game()` -> PZ-D.bat | `launch` | done |
-| `GET /api/steam` | none (new) | `steam` | done — mở cửa sổ Steam nhúng; cũng là nguồn cookie phiên |
+| `GET /api/steam_webview_url` | none | `steam_webview_url` | URL hiện tại của child webview Steam |
+| `POST /api/steam_webview_navigate` | none | `steam_webview_navigate` | điều hướng trong steamcommunity.com |
+| `GET /api/steam_webview_open?id=` | none | `steam_webview_open` | mở item hợp lệ hoặc trang Workshop |
+| `GET /api/steam_webview_reload` | none | `steam_webview_reload` | tải lại child webview Steam |
+| `GET /api/steam_webview_back` / `forward` | none | `steam_webview_back` / `forward` | lịch sử điều hướng |
+| `GET /api/steam_webview_harvest` | none | `steam_webview_harvest` | đọc cookie gia hạn sau khi trang nạp |
 | `GET /img?u=` | CDN proxy + allowlist | none needed | webview loads Steam CDN direct (`csp: null`) |
 | `GET /tokens.css` | file serve | none needed | shipped inside `ui/` |
 

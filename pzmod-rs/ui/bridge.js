@@ -24,7 +24,13 @@
     "/api/prefetch": "prefetch",
     "/api/progress": "progress",
     "/api/launch": "launch",
-    "/api/steam": "steam",
+    "/api/steam_webview_url": "steam_webview_url",
+    "/api/steam_webview_navigate": "steam_webview_navigate",
+    "/api/steam_webview_open": "steam_webview_open",
+    "/api/steam_webview_reload": "steam_webview_reload",
+    "/api/steam_webview_back": "steam_webview_back",
+    "/api/steam_webview_forward": "steam_webview_forward",
+    "/api/steam_webview_harvest": "steam_webview_harvest",
   };
 
   var NO_CMD = "Lỗi nội bộ: giao diện gọi một route không có trong bản Rust: ";

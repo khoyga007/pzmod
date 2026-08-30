@@ -241,6 +241,12 @@ h1, h2, h3 {
 .main { min-inline-size: 0; overflow-y: auto; }
 .view { padding: var(--space-lg) var(--space-lg) var(--space-2xl); }
 .view[hidden] { display: none; }
+.view--steam { min-block-size: 100%; display: flex; flex-direction: column; }
+.steam__toolbar { flex-wrap: nowrap; }
+.steam__url { flex: 1 1 auto; min-inline-size: 12rem; padding-inline: var(--space-sm); font-family: var(--font-mono); font-size: var(--text-xs); }
+.steam__stage { position: relative; flex: 1 1 auto; min-block-size: 16rem; margin-top: var(--space-sm); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-md); background: var(--color-paper-2); overflow: hidden; }
+.steam__loading { display: grid; place-items: center; block-size: 100%; margin: 0; color: var(--color-faint); font-size: var(--text-sm); }
+@media (max-width: 760px) { .steam__toolbar { flex-wrap: wrap; } .steam__url { min-inline-size: 100%; order: 2; } }
 
 /* Khối ô tìm + bộ lọc dính đỉnh khi cuộn. Nền phải đục nếu không card trôi
    xuyên qua; margin/padding bù padding của .view để nền phủ hết ngang. */
@@ -741,7 +747,7 @@ h1, h2, h3 {
         </svg>
         Dò mod lỗi
       </button>
-      <button class="tab" id="tabSteam" title="Mở Workshop trong cửa sổ Steam: bình luận, ảnh, changelog, phụ thuộc">
+      <button class="tab" id="tabSteam" title="Mở Workshop trong tab Steam: bình luận, ảnh, changelog, phụ thuộc">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="10" cy="10" r="7.5"/><path d="M2.7 7.5h14.6M2.7 12.5h14.6"/>
           <path d="M10 2.5c2 2.4 3 4.9 3 7.5s-1 5.1-3 7.5c-2-2.4-3-4.9-3-7.5s1-5.1 3-7.5Z"/>
@@ -795,6 +801,23 @@ h1, h2, h3 {
       <div class="grid" id="grid"></div>
       <p class="empty" id="empty" hidden>Không có kết quả. Đổi từ khoá hoặc bỏ bớt thẻ.</p>
       <div class="more"><button class="btn btn--tall" id="more">Tải thêm</button></div>
+    </section>
+
+    <!-- ── Steam ────────────────────────────────────────────── -->
+    <section class="view view--steam" id="viewSteam" hidden>
+      <div class="head">
+        <h2>Steam Workshop</h2>
+        <p>Duyệt Workshop, đọc bình luận và cài mod ngay từ trang đang xem.</p>
+      </div>
+      <div class="toolbar steam__toolbar">
+        <button class="btn btn--tall" id="steamBack" title="Quay lại" disabled>←</button>
+        <button class="btn btn--tall" id="steamForward" title="Tiến tới" disabled>→</button>
+        <button class="btn btn--tall" id="steamHome" title="Trang Workshop" disabled>⌂</button>
+        <button class="btn btn--tall" id="steamReload" title="Tải lại" disabled>↻</button>
+        <input class="input steam__url" id="steamUrl" type="url" placeholder="https://steamcommunity.com/..." autocomplete="off" disabled>
+        <button class="btn btn--accent btn--tall" id="steamInstall" title="Mở trang chi tiết mod trước" disabled>↓ Tải mod này</button>
+      </div>
+      <div class="steam__stage" id="steamStage"><p class="steam__loading" id="steamLoading">Đang tải Steam…</p></div>
     </section>
 
     <!-- ── Installed ────────────────────────────────────────── -->
@@ -1473,12 +1496,131 @@ $("sheetInstall").addEventListener("click", (ev) => {
 });
 $("sheetClose").addEventListener("click", () => $("sheet").close());
 
-/* Cửa sổ Steam nhúng. Grid native vẫn là chỗ cài/gỡ; cửa sổ này để đọc những
-   thứ API không trả về: bình luận, ảnh người chơi đăng, changelog. Nó cũng là
-   nguồn cookie phiên nên mở lần đầu có thể phải đăng nhập Steam. */
-const openSteam = (id) => api("/api/steam" + (id ? "?id=" + id : "")).catch((e) => showLog({ ok: false, error: e.message }));
+/* Steam blocks iframes, so this is a real Tauri child webview. It has no DOM
+   lifecycle: keep it alive between tabs and follow the placeholder's physical
+   bounds explicitly. */
+const STEAM_HOME = "https://steamcommunity.com/workshop/browse/?appid=108600&section=readytouseitems";
+const STEAM_LABEL = "steam-browser";
+const steamTauri = window.__TAURI__ || {};
+const SteamWebview = steamTauri.webview && steamTauri.webview.Webview;
+const steamWindow = steamTauri.window && steamTauri.window.getCurrentWindow && steamTauri.window.getCurrentWindow();
+const SteamPosition = steamTauri.dpi && steamTauri.dpi.PhysicalPosition;
+const SteamSize = steamTauri.dpi && steamTauri.dpi.PhysicalSize;
+const steam = { webview: null, ready: false, active: false, url: STEAM_HOME, poll: null, observer: null, timers: [] };
+
+function steamItemId(url) {
+  const hit = String(url || "").match(/(?:\?id=|filedetails\/\?id=|workshop\/content\/\d+\/)(\d+)/);
+  return hit ? hit[1] : "";
+}
+
+function syncSteamControls() {
+  const ready = steam.ready;
+  ["steamBack", "steamForward", "steamHome", "steamReload", "steamUrl"].forEach((id) => { $(id).disabled = !ready; });
+  $("steamInstall").disabled = !ready || !steamItemId(steam.url);
+  $("steamInstall").title = steamItemId(steam.url) ? "" : "Mở trang chi tiết mod trước";
+  $("steamLoading").hidden = ready;
+}
+
+async function syncSteamBounds() {
+  if (!steam.webview || !steam.active) return;
+  const rect = $("steamStage").getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  await steam.webview.setPosition(new SteamPosition(Math.round(rect.left * dpr), Math.round(rect.top * dpr)));
+  await steam.webview.setSize(new SteamSize(Math.max(1, Math.round(rect.width * dpr)), Math.max(1, Math.round(rect.height * dpr))));
+}
+
+function scheduleSteamBounds() {
+  steam.timers.forEach(clearTimeout);
+  steam.timers = [50, 150, 400, 1000].map((ms) => setTimeout(() => syncSteamBounds().catch(() => {}), ms));
+}
+
+function harvestSteamCookie() {
+  api("/api/steam_webview_harvest").catch(() => {});
+}
+
+function startSteamPolling() {
+  if (steam.poll) return;
+  const tick = async () => {
+    if (!steam.ready) return;
+    try {
+      const url = await api("/api/steam_webview_url");
+      if (url && url !== steam.url) {
+        steam.url = url;
+        $("steamUrl").value = url;
+        syncSteamControls();
+        harvestSteamCookie();
+      }
+    } catch (_) {}
+  };
+  steam.poll = setInterval(tick, 700);
+  tick();
+}
+
+function setSteamVisibility(active) {
+  steam.active = active;
+  if (!steam.webview) return;
+  if (active) {
+    steam.webview.show().then(() => { syncSteamBounds().catch(() => {}); scheduleSteamBounds(); }).catch(() => {});
+  } else {
+    steam.webview.hide().catch(() => {});
+  }
+}
+
+async function ensureSteamWebview() {
+  if (steam.webview) return;
+  if (!SteamWebview || !steamWindow || !SteamPosition || !SteamSize) throw new Error("Bản Tauri này không có child webview");
+  const stale = await SteamWebview.getByLabel(STEAM_LABEL);
+  if (stale) await stale.close().catch(() => {});
+  const rect = $("steamStage").getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const webview = new SteamWebview(steamWindow, STEAM_LABEL, {
+    url: STEAM_HOME,
+    x: Math.round(rect.left * dpr), y: Math.round(rect.top * dpr),
+    width: Math.max(1, Math.round(rect.width * dpr)), height: Math.max(1, Math.round(rect.height * dpr)),
+  });
+  webview.once("tauri://created", () => {
+    steam.webview = webview;
+    steam.ready = true;
+    syncSteamControls();
+    if (steam.active) setSteamVisibility(true); else webview.hide().catch(() => {});
+    steam.observer = new ResizeObserver(() => syncSteamBounds().catch(() => {}));
+    steam.observer.observe($("steamStage"));
+    window.addEventListener("resize", scheduleSteamBounds);
+    scheduleSteamBounds();
+    startSteamPolling();
+    harvestSteamCookie();
+  });
+  webview.once("tauri://error", () => showLog({ ok: false, error: "Không tạo được tab Steam" }));
+}
+
+async function navigateSteam(url) {
+  await api("/api/steam_webview_navigate", { url });
+  steam.url = url;
+  $("steamUrl").value = url;
+  syncSteamControls();
+  setTimeout(harvestSteamCookie, 500);
+}
+
+async function openSteam(id) {
+  setTab("steam");
+  try {
+    await ensureSteamWebview();
+    await api("/api/steam_webview_open" + (id ? "?id=" + encodeURIComponent(id) : ""));
+    setTimeout(harvestSteamCookie, 500);
+  } catch (e) {
+    showLog({ ok: false, error: e.message });
+  }
+}
+
 $("sheetSteam").addEventListener("click", (ev) => openSteam(ev.currentTarget.dataset.id));
 $("tabSteam").addEventListener("click", () => openSteam(""));
+$("steamBack").addEventListener("click", () => api("/api/steam_webview_back").catch((e) => showLog({ ok: false, error: e.message })));
+$("steamForward").addEventListener("click", () => api("/api/steam_webview_forward").catch((e) => showLog({ ok: false, error: e.message })));
+$("steamHome").addEventListener("click", () => navigateSteam(STEAM_HOME).catch((e) => showLog({ ok: false, error: e.message })));
+$("steamReload").addEventListener("click", () => api("/api/steam_webview_reload").then(() => setTimeout(harvestSteamCookie, 500)).catch((e) => showLog({ ok: false, error: e.message })));
+$("steamUrl").addEventListener("keydown", (ev) => { if (ev.key === "Enter") navigateSteam(ev.currentTarget.value).catch((e) => showLog({ ok: false, error: e.message })); });
+$("steamInstall").addEventListener("click", (ev) => { const id = steamItemId(steam.url); if (id) act("install", id, ev.currentTarget); });
 
 $("more").addEventListener("click", () => load(false));
 
@@ -1532,17 +1674,19 @@ $("q").addEventListener("input", (ev) => {
 });
 
 /* ── tabs ─────────────────────────────────────────────────────── */
-const TABS = { browse: "tabBrowse", have: "tabHave", bisect: "tabBisect" };
+const TABS = { browse: "tabBrowse", have: "tabHave", bisect: "tabBisect", steam: "tabSteam" };
 function setTab(which) {
   $("viewBrowse").hidden = which !== "browse";
   $("viewHave").hidden = which !== "have";
   $("viewBisect").hidden = which !== "bisect";
+  $("viewSteam").hidden = which !== "steam";
   for (const [key, el] of Object.entries(TABS)) {
     if (key === which) $(el).setAttribute("aria-current", "page");
     else $(el).removeAttribute("aria-current");
   }
   $("queue").hidden = which !== "browse" || state.picked.size === 0;
   document.querySelector(".main").scrollTop = 0;
+  setSteamVisibility(which === "steam");
 }
 $("tabBrowse").addEventListener("click", () => setTab("browse"));
 $("tabHave").addEventListener("click", () => { renderHave(); setTab("have"); });

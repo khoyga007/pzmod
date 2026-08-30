@@ -26,13 +26,11 @@ const COLLECTION_URL: &str =
 const BROWSE_URL: &str = "https://steamcommunity.com/workshop/browse/?";
 const ITEM_URL: &str = "https://steamcommunity.com/sharedfiles/filedetails/?id=";
 const UA: &str = "Mozilla/5.0 (pzmod)";
-/// Trang Workshop của PZ mở trong cửa sổ Steam nhúng. Cùng một cửa sổ vừa là
-/// chỗ đọc bình luận/ảnh/phụ thuộc, vừa là nguồn phiên đăng nhập: mỗi lần nạp
-/// trang, Steam đổi refresh token lấy access token mới, nên cookie không còn
-/// chết sau một ngày như bản đọc file.
+/// Trang Workshop của PZ mở trong child webview của tab Steam. Webview được
+/// giữ sống khi đổi tab, nên Steam vẫn có thể gia hạn access token.
 const WORKSHOP_HOME: &str =
     "https://steamcommunity.com/workshop/browse/?appid=108600&section=readytouseitems";
-const STEAM_WINDOW: &str = "steam";
+const STEAM_WEBVIEW: &str = "steam-browser";
 const BROWSE_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUIRES_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const BROWSE_GAP: Duration = Duration::from_secs(2);
@@ -418,14 +416,9 @@ fn steam_log(line: &str) {
     }
 }
 
-/// WebView2 tự khoá nếu đọc cookie ngay trong event handler (wry#583), nên việc
-/// đọc bị đẩy sang thread khác. Chỉ đọc ở nhịp Finished: lúc Started thì Steam
-/// chưa kịp đặt cookie mới, và ở cửa sổ ẩn dựng trong setup() vòng lặp sự kiện
-/// còn chưa chạy nên gọi sớm là treo luôn thread đó.
-fn harvest_cookie(webview: tauri::WebviewWindow, event: tauri::webview::PageLoadEvent) {
-    if !matches!(event, tauri::webview::PageLoadEvent::Finished) {
-        return;
-    }
+/// WebView2 tự khoá nếu đọc cookie trong page-load callback (wry#583), nên UI
+/// gọi lệnh này sau khi tạo/điều hướng rồi việc đọc bị đẩy sang thread khác.
+fn harvest_cookie(webview: tauri::Webview) {
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(1200));
         let Ok(url) = "https://steamcommunity.com/".parse() else {
@@ -463,37 +456,21 @@ fn harvest_cookie(webview: tauri::WebviewWindow, event: tauri::webview::PageLoad
     });
 }
 
-/// Một cửa sổ duy nhất: dựng ẩn lúc khởi động để giữ phiên, hiện lên khi Yang
-/// bấm xem. Không thay grid native - đây là chỗ đọc bình luận, ảnh, changelog,
-/// những thứ GetPublishedFileDetails không trả về.
-fn open_steam_window(app: &tauri::AppHandle, url: tauri::Url, visible: bool) -> Result<(), String> {
+fn steam_webview(app: &tauri::AppHandle) -> Result<tauri::Webview, String> {
     use tauri::Manager;
-    if let Some(window) = app.get_webview_window(STEAM_WINDOW) {
-        steam_log(&format!(
-            "window: get_webview_window trả Some, navigate+show visible={visible}"
-        ));
-        window.navigate(url).map_err(|e| e.to_string())?;
-        if visible {
-            window.show().map_err(|e| e.to_string())?;
-            window.set_focus().map_err(|e| e.to_string())?;
-        }
-        return Ok(());
+    app.get_webview(STEAM_WEBVIEW)
+        .ok_or_else(|| "Tab Steam chưa sẵn sàng".to_string())
+}
+
+fn steam_url(value: &str) -> Result<tauri::Url, String> {
+    let url: tauri::Url = value
+        .parse()
+        .map_err(|_| "URL Steam không hợp lệ".to_string())?;
+    if url.scheme() == "https" && url.host_str() == Some("steamcommunity.com") {
+        Ok(url)
+    } else {
+        Err("Chỉ cho phép trang https://steamcommunity.com/ trong tab Steam".to_string())
     }
-    steam_log(&format!(
-        "window: get_webview_window trả None, dựng mới visible={visible}"
-    ));
-    steam_log("window: TRƯỚC build");
-    let result =
-        tauri::WebviewWindowBuilder::new(app, STEAM_WINDOW, tauri::WebviewUrl::External(url))
-            .title("Steam Workshop")
-            .inner_size(1180.0, 880.0)
-            .visible(visible)
-            .on_page_load(|webview, payload| harvest_cookie(webview, payload.event()))
-            .build();
-    steam_log("window: SAU build");
-    result
-        .map(|_| ())
-        .map_err(|e| format!("Không mở được cửa sổ Steam: {e}"))
 }
 
 fn url_encode(value: &str) -> String {
@@ -3299,11 +3276,7 @@ async fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value,
     .await
 }
 
-/// Mở cửa sổ Steam ở đúng mod (id) hoặc ở trang duyệt Workshop khi không có id.
-/// Lệnh đồng bộ nên Tauri chạy nó trên main thread, đúng chỗ được phép dựng cửa
-/// sổ. Không đọc cookie ở đây: đọc trong event handler là treo WebView2.
-/// Id rác thì mở trang duyệt chứ không ghép vào URL: cửa sổ này chạy trên
-/// domain thật của Steam, không phải asset của app.
+/// Id rác mở trang duyệt thay vì được ghép vào URL thô.
 fn steam_target(id: Option<&str>) -> String {
     match id.filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())) {
         Some(id) => format!("{ITEM_URL}{id}"),
@@ -3311,42 +3284,78 @@ fn steam_target(id: Option<&str>) -> String {
     }
 }
 
-fn keeps_steam_window_alive(label: &str) -> bool {
-    label == STEAM_WINDOW
+#[tauri::command]
+fn steam_webview_url(app: tauri::AppHandle) -> Result<String, String> {
+    steam_webview(&app)?
+        .url()
+        .map(|url| url.to_string())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-async fn steam(app: tauri::AppHandle, id: Option<String>) -> Result<Value, String> {
-    let target = steam_target(id.as_deref());
-    let url = target.parse().map_err(|_| "URL Steam hỏng".to_string())?;
-    open_steam_window(&app, url, true)?;
-    Ok(json!({ "ok": true }))
+fn steam_webview_navigate(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    steam_webview(&app)?
+        .navigate(steam_url(&url)?)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn steam_webview_open(app: tauri::AppHandle, id: Option<String>) -> Result<(), String> {
+    let url = steam_url(&steam_target(id.as_deref()))?;
+    steam_webview(&app)?
+        .navigate(url)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn steam_webview_reload(app: tauri::AppHandle) -> Result<(), String> {
+    steam_webview(&app)?
+        .reload()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn steam_webview_back(app: tauri::AppHandle) -> Result<(), String> {
+    steam_webview(&app)?
+        .eval("window.history.back()")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn steam_webview_forward(app: tauri::AppHandle) -> Result<(), String> {
+    steam_webview(&app)?
+        .eval("window.history.forward()")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn steam_webview_harvest(app: tauri::AppHandle) -> Result<(), String> {
+    harvest_cookie(steam_webview(&app)?);
+    Ok(())
 }
 
 fn main() {
     tauri::Builder::default()
-        .setup(|app| {
-            // Cửa sổ Steam dựng sẵn nhưng ẩn: nó nạp trang Workshop một nhịp để
-            // Steam gia hạn access token, nhờ vậy cookie luôn mới mà Yang không
-            // phải dán tay. Mở app không có mạng thì bỏ qua, grid vẫn chạy bằng
-            // cookie trên đĩa.
-            if let Ok(url) = WORKSHOP_HOME.parse() {
-                let _ = open_steam_window(app.handle(), url, false);
-            }
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if keeps_steam_window_alive(window.label()) {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    steam_log("window: CloseRequested -> prevent_close + hide");
-                }
-            }
-        })
         .invoke_handler(tauri::generate_handler![
-            state, enable, disable, browse, detail, bisect, install, remove, update, prefetch,
-            progress, launch, steam
+            state,
+            enable,
+            disable,
+            browse,
+            detail,
+            bisect,
+            install,
+            remove,
+            update,
+            prefetch,
+            progress,
+            launch,
+            steam_webview_url,
+            steam_webview_navigate,
+            steam_webview_open,
+            steam_webview_reload,
+            steam_webview_back,
+            steam_webview_forward,
+            steam_webview_harvest
         ])
         .run(tauri::generate_context!())
         .expect("pzmod: tauri failed to start");
@@ -3387,9 +3396,13 @@ mod tests {
     }
 
     #[test]
-    fn steam_window_close_is_hidden_instead_of_destroyed() {
-        assert!(keeps_steam_window_alive(STEAM_WINDOW));
-        assert!(!keeps_steam_window_alive("main"));
+    fn steam_webview_rejects_non_community_urls() {
+        assert!(steam_url(WORKSHOP_HOME).is_ok());
+        assert!(
+            steam_url("https://steamcommunity.com/sharedfiles/filedetails/?id=3429790870").is_ok()
+        );
+        assert!(steam_url("https://store.steampowered.com/").is_err());
+        assert!(steam_url("https://steamcommunity.com.evil.example/").is_err());
     }
 
     #[test]

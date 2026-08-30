@@ -26,16 +26,21 @@ The token expires and is bound to the egress IP used when Steam issued it.
 Recreate the file after expiry, a Steam logout, or a Warp/VPN IP change. The
 value is read once at startup, so restart pzmod after replacing the file.
 
-pzmod also builds a hidden `steam` webview window at startup pointed at the
-Workshop listing. Steam refreshes the access token on each page load, so the
-window doubles as the session source: `on_page_load` harvests `steamLoginSecure`
-off the main thread (reading cookies inside the handler deadlocks WebView2,
-wry#583) and writes it back to the file. `GET /api/steam` shows that same window
--- at one item with `?id=`, at the listing without -- for comments, screenshots
-and changelogs the API does not return. It never replaces the native grid. A
+The Steam tab creates one Tauri child webview on its first use. It remains alive
+and is only hidden while another pzmod tab is active, so the Steam session is
+retained rather than recreated on each visit. After creation or navigation, the
+Rust command harvests `steamLoginSecure` off the main thread after a short delay
+(reading cookies during a WebView2 page-load callback deadlocks, wry#583) and
+writes it back to the file. The native grid remains the installer; the tab is
+only for comments, screenshots and changelogs the API does not return. A
 logged-out Workshop response is an authentication error rather than a valid
 partial listing. Cache keys are partitioned by whether authentication is
 configured so old anonymous pages cannot hide mature results.
+
+The app enables Tauri's `unstable` feature solely for child-webview APIs. The
+tab must be a real WebView2 child because Steam blocks iframes with
+`X-Frame-Options`; an iframe is not a fallback. The Steam child has no `remote`
+capability, so a remote Steam page cannot invoke pzmod commands.
 
 Acceptance case: an authenticated text search for `Tomb Player Body Overhaul`
 under appid `108600` includes Workshop item `3429790870`; its Required Items
