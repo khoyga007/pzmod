@@ -242,7 +242,7 @@ h1, h2, h3 {
 .view { padding: var(--space-lg) var(--space-lg) var(--space-2xl); }
 .view[hidden] { display: none; }
 
-/* Khối ô tìm + thẻ lọc dính đỉnh khi cuộn. Nền phải đục nếu không card trôi
+/* Khối ô tìm + bộ lọc dính đỉnh khi cuộn. Nền phải đục nếu không card trôi
    xuyên qua; margin/padding bù padding của .view để nền phủ hết ngang. */
 .view__pin {
   position: sticky;
@@ -253,12 +253,8 @@ h1, h2, h3 {
   padding-inline: var(--space-lg);
   padding-block: var(--space-sm);
   border-bottom: var(--rule-hair) solid var(--color-rule);
-  /* cửa sổ hẹp: chips xuống nhiều hàng, không để khối dính nuốt hết màn hình */
-  max-block-size: 45vh;
-  overflow-y: auto;
 }
-.view__pin .toolbar { margin-bottom: var(--space-sm); }
-.view__pin .chips { margin-bottom: 0; }
+.view__pin .toolbar { margin-bottom: 0; }
 
 .head { display: flex; flex-direction: column; gap: var(--space-2xs); margin-bottom: var(--space-md); }
 .head h2 { font-size: var(--text-xl); }
@@ -312,36 +308,21 @@ h1, h2, h3 {
   pointer-events: none;
 }
 
-.seg {
-  display: flex;
-  align-items: center;
+.select {
+  block-size: var(--control-h);
+  padding-inline: var(--space-sm);
   border: var(--rule-hair) solid var(--color-rule-strong);
   border-radius: var(--radius-md);
-  overflow: hidden;
-  block-size: var(--control-h);
-}
-.seg button {
-  block-size: 100%;
-  padding-inline: var(--space-sm);
-  border: 0;
-  border-inline-start: var(--rule-hair) solid var(--color-rule);
   background: var(--color-paper-2);
-  color: var(--color-muted);
+  color: var(--color-ink);
   font: inherit;
   font-size: var(--text-sm);
   white-space: nowrap;
   cursor: pointer;
   transition: background-color var(--dur-micro) var(--ease-out);
 }
-.seg[hidden] { display: none; }   /* display:flex above would beat plain [hidden] */
-.seg button:first-child { border-inline-start: 0; }
-.seg button:hover { background: var(--color-paper-3); color: var(--color-ink); }
-.seg button:active { background: var(--color-paper-4); }
-.seg button[aria-pressed="true"] { background: var(--color-paper-4); color: var(--color-ink); font-weight: var(--weight-mid); }
-.seg button:disabled { opacity: 0.55; cursor: not-allowed; }
-
-.chips { display: flex; flex-wrap: wrap; gap: var(--space-2xs); margin-bottom: var(--space-md); }
-.chips[hidden] { display: none; }
+.select:hover { background: var(--color-paper-3); }
+.select[hidden] { display: none; }
 .chip {
   padding: var(--space-3xs) var(--space-xs);
   border: var(--rule-hair) solid var(--color-rule);
@@ -797,12 +778,11 @@ h1, h2, h3 {
             <input class="input" id="q" type="search" placeholder="Tìm mod trên Workshop" autocomplete="off">
             <kbd>Ctrl K</kbd>
           </label>
-          <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
-          <div class="seg" id="daySeg" role="group" aria-label="Khoảng thời gian" hidden></div>
+          <select class="select" id="sortSel" aria-label="Sắp xếp"></select>
+          <select class="select" id="daySel" aria-label="Khoảng thời gian" hidden></select>
+          <select class="select" id="tagSel" aria-label="Thẻ phân loại"></select>
           <button class="btn btn--tall" id="pickPage">Chọn cả trang</button>
         </div>
-
-        <div class="chips" id="chips" role="group" aria-label="Thẻ phân loại"></div>
       </div>
 
       <div class="grid" id="grid"></div>
@@ -1067,13 +1047,16 @@ function defaultDays() {
   return state.sort === "totaluniquesubscriptions" ? "3650" : "7";
 }
 
-function syncDaySeg() {
-  const seg = $("daySeg");
-  seg.hidden = !hasWindow();
-  if (seg.hidden) return;
-  const want = state.days || defaultDays();
-  state.days = want;
-  seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.days === want)));
+function syncControls() {
+  $("sortSel").value = state.sort;
+  const daySel = $("daySel");
+  daySel.hidden = !hasWindow();
+  if (!daySel.hidden) {
+    const want = state.days || defaultDays();
+    state.days = want;
+    daySel.value = want;
+  }
+  $("tagSel").value = state.tag;
 }
 
 async function load(reset) {
@@ -1162,9 +1145,8 @@ function jumpToWorkshop(text) {
   state.tag = "";
   state.sort = "trend";
   state.days = "";
-  syncDaySeg();
   $("q").value = state.q;
-  $("chips").querySelectorAll(".chip").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.tag === "")));
+  syncControls();
   setTab("browse");
   load(true);
 }
@@ -1530,7 +1512,7 @@ $("updateAll").addEventListener("click", async (ev) => {
 let typing;
 $("q").addEventListener("input", (ev) => {
   state.q = ev.target.value.trim();
-  syncDaySeg();          // a search is ranked by relevance — no window applies
+  syncControls();        // a search is ranked by relevance — no window applies
   clearTimeout(typing);
   typing = setTimeout(() => load(true), 700);
 });
@@ -1565,38 +1547,30 @@ document.addEventListener("keydown", (ev) => {
 (async () => {
   await refreshState();
 
-  $("sortSeg").innerHTML = Object.entries(state.sorts)
+  $("sortSel").innerHTML = Object.entries(state.sorts)
     .filter(([k]) => k !== "textsearch")
-    .map(([k, label], i) => `<button data-sort="${k}" aria-pressed="${i === 0}">${esc(label)}</button>`).join("");
-  $("sortSeg").addEventListener("click", (ev) => {
-    const b = ev.target.closest("[data-sort]");
-    if (!b) return;
-    state.sort = b.dataset.sort;
-    $("sortSeg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
-    syncDaySeg();
+    .map(([k, label]) => `<option value="${esc(k)}">${esc(label)}</option>`).join("");
+  $("sortSel").addEventListener("change", () => {
+    state.sort = $("sortSel").value;
+    state.days = "";   // sort mới -> ngày về mặc định của sort đó, không giữ giá trị cũ
+    syncControls();
     load(true);
   });
 
-  $("daySeg").innerHTML = state.periods
-    .map(([v, label]) => `<button data-days="${esc(v)}" aria-pressed="${v === state.days}">${esc(label)}</button>`).join("");
-  $("daySeg").addEventListener("click", (ev) => {
-    const b = ev.target.closest("[data-days]");
-    if (!b) return;
-    state.days = b.dataset.days;
-    $("daySeg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  $("daySel").innerHTML = state.periods
+    .map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join("");
+  $("daySel").addEventListener("change", () => {
+    state.days = $("daySel").value;
     load(true);
   });
-  syncDaySeg();
 
-  $("chips").innerHTML = [["", "Tất cả"]].concat(state.tags.map((t) => [t, t]))
-    .map(([v, label], i) => `<button class="chip" data-tag="${esc(v)}" aria-pressed="${i === 0}">${esc(label)}</button>`).join("");
-  $("chips").addEventListener("click", (ev) => {
-    const b = ev.target.closest("[data-tag]");
-    if (!b) return;
-    state.tag = b.dataset.tag;
-    $("chips").querySelectorAll(".chip").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  $("tagSel").innerHTML = [["", "Tất cả"]].concat(state.tags.map((t) => [t, t]))
+    .map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join("");
+  $("tagSel").addEventListener("change", () => {
+    state.tag = $("tagSel").value;
     load(true);
   });
+  syncControls();
 
   // Grid first: the workshop is already on screen before anyone types anything.
   load(true);
