@@ -23,7 +23,8 @@ it only to `steamcommunity.com`; the value must come from that domain, not
 trimmed value in the file, never commit or log it.
 
 The token expires and is bound to the egress IP used when Steam issued it.
-Recreate the file after expiry, a Steam logout, or a Warp/VPN IP change. A
+Recreate the file after expiry, a Steam logout, or a Warp/VPN IP change. The
+value is read once at startup, so restart pzmod after replacing the file. A
 logged-out Workshop response is an authentication error rather than a valid
 partial listing. Cache keys are partitioned by whether authentication is
 configured so old anonymous pages cannot hide mature results.
