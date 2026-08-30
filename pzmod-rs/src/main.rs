@@ -3311,8 +3311,12 @@ fn steam_target(id: Option<&str>) -> String {
     }
 }
 
+fn keeps_steam_window_alive(label: &str) -> bool {
+    label == STEAM_WINDOW
+}
+
 #[tauri::command]
-fn steam(app: tauri::AppHandle, id: Option<String>) -> Result<Value, String> {
+async fn steam(app: tauri::AppHandle, id: Option<String>) -> Result<Value, String> {
     let target = steam_target(id.as_deref());
     let url = target.parse().map_err(|_| "URL Steam hỏng".to_string())?;
     open_steam_window(&app, url, true)?;
@@ -3330,6 +3334,15 @@ fn main() {
                 let _ = open_steam_window(app.handle(), url, false);
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if keeps_steam_window_alive(window.label()) {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    steam_log("window: CloseRequested -> prevent_close + hide");
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             state, enable, disable, browse, detail, bisect, install, remove, update, prefetch,
@@ -3371,6 +3384,12 @@ mod tests {
         assert_eq!(steam_target(Some("")), WORKSHOP_HOME);
         assert_eq!(steam_target(Some("3429790870&x=1")), WORKSHOP_HOME);
         assert_eq!(steam_target(Some("../../etc")), WORKSHOP_HOME);
+    }
+
+    #[test]
+    fn steam_window_close_is_hidden_instead_of_destroyed() {
+        assert!(keeps_steam_window_alive(STEAM_WINDOW));
+        assert!(!keeps_steam_window_alive("main"));
     }
 
     #[test]
