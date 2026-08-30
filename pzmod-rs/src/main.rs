@@ -2815,7 +2815,7 @@ fn bisect_start_internal(names: Option<Vec<String>>, user: &Path) -> Result<Valu
         if let Ok(text) = fs::read_to_string(&state_file) {
             if let Ok(val) = serde_json::from_str::<Value>(&text) {
                 if !val.get("done").and_then(Value::as_bool).unwrap_or(false) {
-                    return Err("Đang có phiên bisect hoạt động. Hãy chạy 'pzbisect stop' trước khi bắt đầu phiên mới.".into());
+                    return Err("Đang có phiên bisect hoạt động. Hãy bấm 'Dừng' trong tab Dò mod lỗi trước khi bắt đầu phiên mới.".into());
                 }
             }
         }
