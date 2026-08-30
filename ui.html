@@ -242,6 +242,24 @@ h1, h2, h3 {
 .view { padding: var(--space-lg) var(--space-lg) var(--space-2xl); }
 .view[hidden] { display: none; }
 
+/* Khối ô tìm + thẻ lọc dính đỉnh khi cuộn. Nền phải đục nếu không card trôi
+   xuyên qua; margin/padding bù padding của .view để nền phủ hết ngang. */
+.view__pin {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: var(--z-sticky);   /* trên card, dưới drawer/toast */
+  background: var(--color-paper);
+  margin-inline: calc(var(--space-lg) * -1);
+  padding-inline: var(--space-lg);
+  padding-block: var(--space-sm);
+  border-bottom: var(--rule-hair) solid var(--color-rule);
+  /* cửa sổ hẹp: chips xuống nhiều hàng, không để khối dính nuốt hết màn hình */
+  max-block-size: 45vh;
+  overflow-y: auto;
+}
+.view__pin .toolbar { margin-bottom: var(--space-sm); }
+.view__pin .chips { margin-bottom: 0; }
+
 .head { display: flex; flex-direction: column; gap: var(--space-2xs); margin-bottom: var(--space-md); }
 .head h2 { font-size: var(--text-xl); }
 .head p { margin: 0; color: var(--color-faint); font-size: var(--text-sm); max-inline-size: 68ch; }
@@ -769,21 +787,23 @@ h1, h2, h3 {
         <p>This is how you mod (die)</p>
       </div>
 
-      <div class="toolbar">
-        <label class="field">
-          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-            <circle cx="8.75" cy="8.75" r="5.25"/><path d="M12.6 12.6 16.5 16.5" stroke-linecap="round"/>
-          </svg>
-          <span class="u-sr" hidden>Tìm mod</span>
-          <input class="input" id="q" type="search" placeholder="Tìm mod trên Workshop" autocomplete="off">
-          <kbd>Ctrl K</kbd>
-        </label>
-        <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
-        <div class="seg" id="daySeg" role="group" aria-label="Khoảng thời gian" hidden></div>
-        <button class="btn btn--tall" id="pickPage">Chọn cả trang</button>
-      </div>
+      <div class="view__pin">
+        <div class="toolbar">
+          <label class="field">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+              <circle cx="8.75" cy="8.75" r="5.25"/><path d="M12.6 12.6 16.5 16.5" stroke-linecap="round"/>
+            </svg>
+            <span class="u-sr" hidden>Tìm mod</span>
+            <input class="input" id="q" type="search" placeholder="Tìm mod trên Workshop" autocomplete="off">
+            <kbd>Ctrl K</kbd>
+          </label>
+          <div class="seg" id="sortSeg" role="group" aria-label="Sắp xếp"></div>
+          <div class="seg" id="daySeg" role="group" aria-label="Khoảng thời gian" hidden></div>
+          <button class="btn btn--tall" id="pickPage">Chọn cả trang</button>
+        </div>
 
-      <div class="chips" id="chips" role="group" aria-label="Thẻ phân loại"></div>
+        <div class="chips" id="chips" role="group" aria-label="Thẻ phân loại"></div>
+      </div>
 
       <div class="grid" id="grid"></div>
       <p class="empty" id="empty" hidden>Không có kết quả. Đổi từ khoá hoặc bỏ bớt thẻ.</p>
