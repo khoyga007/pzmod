@@ -24,7 +24,15 @@ trimmed value in the file, never commit or log it.
 
 The token expires and is bound to the egress IP used when Steam issued it.
 Recreate the file after expiry, a Steam logout, or a Warp/VPN IP change. The
-value is read once at startup, so restart pzmod after replacing the file. A
+value is read once at startup, so restart pzmod after replacing the file.
+
+pzmod also builds a hidden `steam` webview window at startup pointed at the
+Workshop listing. Steam refreshes the access token on each page load, so the
+window doubles as the session source: `on_page_load` harvests `steamLoginSecure`
+off the main thread (reading cookies inside the handler deadlocks WebView2,
+wry#583) and writes it back to the file. `GET /api/steam` shows that same window
+-- at one item with `?id=`, at the listing without -- for comments, screenshots
+and changelogs the API does not return. It never replaces the native grid. A
 logged-out Workshop response is an authentication error rather than a valid
 partial listing. Cache keys are partitioned by whether authentication is
 configured so old anonymous pages cannot hide mature results.

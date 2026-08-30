@@ -21,6 +21,7 @@ Do not run `build.bat` / release builds unless Yang explicitly asks.
 | `POST /api/bisect` | `pzbisect.bisect_*` | `bisect` | done |
 | `POST /api/prefetch` | `pzmod.prefetch()` background warm | `prefetch` | done |
 | `POST /api/launch` | `launch_game()` -> PZ-D.bat | `launch` | done |
+| `GET /api/steam` | none (new) | `steam` | done — mở cửa sổ Steam nhúng; cũng là nguồn cookie phiên |
 | `GET /img?u=` | CDN proxy + allowlist | none needed | webview loads Steam CDN direct (`csp: null`) |
 | `GET /tokens.css` | file serve | none needed | shipped inside `ui/` |
 

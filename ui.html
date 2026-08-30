@@ -741,6 +741,13 @@ h1, h2, h3 {
         </svg>
         Dò mod lỗi
       </button>
+      <button class="tab" id="tabSteam" title="Mở Workshop trong cửa sổ Steam: bình luận, ảnh, changelog, phụ thuộc">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="10" cy="10" r="7.5"/><path d="M2.7 7.5h14.6M2.7 12.5h14.6"/>
+          <path d="M10 2.5c2 2.4 3 4.9 3 7.5s-1 5.1-3 7.5c-2-2.4-3-4.9-3-7.5s1-5.1 3-7.5Z"/>
+        </svg>
+        Xem trên Steam
+      </button>
     </div>
 
     <div class="queue" id="queue" hidden>
@@ -835,7 +842,7 @@ h1, h2, h3 {
   <div class="sheet__inner">
     <div class="sheet__top">
       <h2 id="sheetTitle">đang tải…</h2>
-      <a class="btn" id="sheetLink" href="#" target="_blank" rel="noreferrer">Steam</a>
+      <button class="btn" id="sheetSteam" title="Mở trang Steam của mod: bình luận, ảnh, changelog">Xem trên Steam</button>
       <button class="btn btn--quiet" id="sheetClose" aria-label="Đóng">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
           <path d="M5 5 15 15M15 5 5 15"/>
@@ -1297,7 +1304,7 @@ async function openSheet(id) {
   $("sheetMeta").textContent = "";
   $("sheetReq").innerHTML = "";
   $("sheetShot").removeAttribute("src");
-  $("sheetLink").href = "https://steamcommunity.com/sharedfiles/filedetails/?id=" + id;
+  $("sheetSteam").dataset.id = id;
   if (!dlg.open) dlg.showModal();
 
   const d = await api("/api/detail?id=" + id);
@@ -1465,6 +1472,13 @@ $("sheetInstall").addEventListener("click", (ev) => {
   act(state.installed[id] ? "update" : "install", id, ev.currentTarget).then(() => openSheet(id));
 });
 $("sheetClose").addEventListener("click", () => $("sheet").close());
+
+/* Cửa sổ Steam nhúng. Grid native vẫn là chỗ cài/gỡ; cửa sổ này để đọc những
+   thứ API không trả về: bình luận, ảnh người chơi đăng, changelog. Nó cũng là
+   nguồn cookie phiên nên mở lần đầu có thể phải đăng nhập Steam. */
+const openSteam = (id) => api("/api/steam" + (id ? "?id=" + id : "")).catch((e) => showLog({ ok: false, error: e.message }));
+$("sheetSteam").addEventListener("click", (ev) => openSteam(ev.currentTarget.dataset.id));
+$("tabSteam").addEventListener("click", () => openSteam(""));
 
 $("more").addEventListener("click", () => load(false));
 

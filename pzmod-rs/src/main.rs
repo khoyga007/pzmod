@@ -26,6 +26,13 @@ const COLLECTION_URL: &str =
 const BROWSE_URL: &str = "https://steamcommunity.com/workshop/browse/?";
 const ITEM_URL: &str = "https://steamcommunity.com/sharedfiles/filedetails/?id=";
 const UA: &str = "Mozilla/5.0 (pzmod)";
+/// Trang Workshop của PZ mở trong cửa sổ Steam nhúng. Cùng một cửa sổ vừa là
+/// chỗ đọc bình luận/ảnh/phụ thuộc, vừa là nguồn phiên đăng nhập: mỗi lần nạp
+/// trang, Steam đổi refresh token lấy access token mới, nên cookie không còn
+/// chết sau một ngày như bản đọc file.
+const WORKSHOP_HOME: &str =
+    "https://steamcommunity.com/workshop/browse/?appid=108600&section=readytouseitems";
+const STEAM_WINDOW: &str = "steam";
 const BROWSE_TTL: Duration = Duration::from_secs(30 * 60);
 const REQUIRES_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const BROWSE_GAP: Duration = Duration::from_secs(2);
@@ -305,19 +312,109 @@ fn http_agent() -> &'static ureq::Agent {
     })
 }
 
-fn steam_cookie() -> Option<&'static str> {
+fn steam_cookie_path() -> Option<PathBuf> {
+    Some(
+        env_path("LOCALAPPDATA")?
+            .join("pzmod")
+            .join("steam-cookie.txt"),
+    )
+}
+
+/// Giá trị đi thẳng vào header Cookie, nên phải loại những ký tự cắt được
+/// header ra làm đôi.
+fn usable_cookie(value: &str) -> bool {
+    !value.is_empty() && !value.contains(['\r', '\n', ';']) && value.is_ascii()
+}
+
+/// Bản trên đĩa: dùng ngay lúc mở app, trước khi cửa sổ Steam kịp nạp xong.
+fn stored_cookie() -> Option<String> {
     static COOKIE: OnceLock<Option<String>> = OnceLock::new();
     COOKIE
         .get_or_init(|| {
-            let path = env_path("LOCALAPPDATA")?
-                .join("pzmod")
-                .join("steam-cookie.txt");
-            let cookie = fs::read_to_string(path).ok()?;
+            let cookie = fs::read_to_string(steam_cookie_path()?).ok()?;
             let cookie = cookie.trim();
-            (!cookie.is_empty() && !cookie.contains(['\r', '\n', ';']) && cookie.is_ascii())
-                .then(|| cookie.to_owned())
+            usable_cookie(cookie).then(|| cookie.to_owned())
         })
-        .as_deref()
+        .clone()
+}
+
+fn live_cookie() -> &'static Mutex<Option<String>> {
+    static LIVE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(None))
+}
+
+fn steam_cookie() -> Option<String> {
+    live_cookie()
+        .lock()
+        .ok()
+        .and_then(|cookie| cookie.clone())
+        .or_else(stored_cookie)
+}
+
+/// Ghi lại token webview vừa gia hạn. Giá trị chỉ được chạm tới ở đây và ở
+/// header gửi steamcommunity.com: không log, không trả về UI, không vào lỗi.
+fn remember_cookie(value: String) {
+    if !usable_cookie(&value) {
+        return;
+    }
+    let Ok(mut slot) = live_cookie().lock() else {
+        return;
+    };
+    if slot.as_deref() == Some(value.as_str()) {
+        return;
+    }
+    if let Some(path) = steam_cookie_path() {
+        if path
+            .parent()
+            .is_some_and(|dir| fs::create_dir_all(dir).is_ok())
+        {
+            let _ = fs::write(&path, &value);
+        }
+    }
+    *slot = Some(value);
+}
+
+/// WebView2 tự khoá nếu đọc cookie ngay trong event handler (wry#583), nên việc
+/// đọc bị đẩy hẳn sang thread khác.
+fn harvest_cookie(webview: tauri::WebviewWindow) {
+    thread::spawn(move || {
+        let Ok(url) = "https://steamcommunity.com/".parse() else {
+            return;
+        };
+        let Ok(cookies) = webview.cookies_for_url(url) else {
+            return;
+        };
+        if let Some(value) = cookies
+            .iter()
+            .find(|cookie| cookie.name() == "steamLoginSecure")
+            .map(|cookie| cookie.value().to_owned())
+        {
+            remember_cookie(value);
+        }
+    });
+}
+
+/// Một cửa sổ duy nhất: dựng ẩn lúc khởi động để giữ phiên, hiện lên khi Yang
+/// bấm xem. Không thay grid native - đây là chỗ đọc bình luận, ảnh, changelog,
+/// những thứ GetPublishedFileDetails không trả về.
+fn open_steam_window(app: &tauri::AppHandle, url: tauri::Url, visible: bool) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(STEAM_WINDOW) {
+        window.navigate(url).map_err(|e| e.to_string())?;
+        if visible {
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(app, STEAM_WINDOW, tauri::WebviewUrl::External(url))
+        .title("Steam Workshop")
+        .inner_size(1180.0, 880.0)
+        .visible(visible)
+        .on_page_load(|webview, _| harvest_cookie(webview))
+        .build()
+        .map(|_| ())
+        .map_err(|e| format!("Không mở được cửa sổ Steam: {e}"))
 }
 
 fn url_encode(value: &str) -> String {
@@ -567,7 +664,7 @@ fn fetch_page(url: &str, is_foreground: bool, gap: Duration) -> Result<String, B
     rate_limit_gap(is_foreground, gap);
 
     let mut request = http_agent().get(url).header("User-Agent", UA);
-    if let Some(cookie) = steam_cookie().and_then(|cookie| steam_cookie_header(url, cookie)) {
+    if let Some(cookie) = steam_cookie().and_then(|cookie| steam_cookie_header(url, &cookie)) {
         request = request.header("Cookie", cookie);
     }
     let fetched = request
@@ -3112,11 +3209,41 @@ async fn bisect(op: Option<String>, names: Option<Vec<String>>) -> Result<Value,
     .await
 }
 
+/// Mở cửa sổ Steam ở đúng mod (id) hoặc ở trang duyệt Workshop khi không có id.
+/// Lệnh đồng bộ nên Tauri chạy nó trên main thread, đúng chỗ được phép dựng cửa
+/// sổ. Không đọc cookie ở đây: đọc trong event handler là treo WebView2.
+/// Id rác thì mở trang duyệt chứ không ghép vào URL: cửa sổ này chạy trên
+/// domain thật của Steam, không phải asset của app.
+fn steam_target(id: Option<&str>) -> String {
+    match id.filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())) {
+        Some(id) => format!("{ITEM_URL}{id}"),
+        None => WORKSHOP_HOME.to_string(),
+    }
+}
+
+#[tauri::command]
+fn steam(app: tauri::AppHandle, id: Option<String>) -> Result<Value, String> {
+    let target = steam_target(id.as_deref());
+    let url = target.parse().map_err(|_| "URL Steam hỏng".to_string())?;
+    open_steam_window(&app, url, true)?;
+    Ok(json!({ "ok": true }))
+}
+
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            // Cửa sổ Steam dựng sẵn nhưng ẩn: nó nạp trang Workshop một nhịp để
+            // Steam gia hạn access token, nhờ vậy cookie luôn mới mà Yang không
+            // phải dán tay. Mở app không có mạng thì bỏ qua, grid vẫn chạy bằng
+            // cookie trên đĩa.
+            if let Ok(url) = WORKSHOP_HOME.parse() {
+                let _ = open_steam_window(app.handle(), url, false);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             state, enable, disable, browse, detail, bisect, install, remove, update, prefetch,
-            progress, launch
+            progress, launch, steam
         ])
         .run(tauri::generate_context!())
         .expect("pzmod: tauri failed to start");
@@ -3142,6 +3269,30 @@ mod tests {
             steam_cookie_header("https://api.steampowered.com/", "test-token"),
             None
         );
+    }
+
+    #[test]
+    fn steam_window_target_rejects_a_hand_typed_id() {
+        assert_eq!(
+            steam_target(Some("3429790870")),
+            format!("{ITEM_URL}3429790870")
+        );
+        assert_eq!(steam_target(None), WORKSHOP_HOME);
+        assert_eq!(steam_target(Some("")), WORKSHOP_HOME);
+        assert_eq!(steam_target(Some("3429790870&x=1")), WORKSHOP_HOME);
+        assert_eq!(steam_target(Some("../../etc")), WORKSHOP_HOME);
+    }
+
+    #[test]
+    fn cookie_hygiene_blocks_header_splitting_values() {
+        assert!(usable_cookie("76561198365054157%7C%7Ctoken"));
+        assert!(!usable_cookie(""));
+        assert!(!usable_cookie("token; wants_mature_content_apps=108600"));
+        assert!(!usable_cookie(
+            "token
+X-Injected: 1"
+        ));
+        assert!(!usable_cookie("tokén"));
     }
 
     /// Receipt sống, chạy tay: `cargo test --bins live_browse -- --ignored`.

@@ -24,6 +24,7 @@
     "/api/prefetch": "prefetch",
     "/api/progress": "progress",
     "/api/launch": "launch",
+    "/api/steam": "steam",
   };
 
   var NO_CMD = "Lỗi nội bộ: giao diện gọi một route không có trong bản Rust: ";
