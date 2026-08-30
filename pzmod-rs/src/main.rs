@@ -3616,6 +3616,145 @@ mod tests {
     }
 
     #[test]
+    fn test_bisect_convergence_sweep_invariants() {
+        let candidate_counts = [2, 3, 4, 5, 7, 8, 12, 15, 16, 23, 31, 32, 47, 63, 64];
+
+        for &n in &candidate_counts {
+            let culprits_to_test: Vec<usize> = if n <= 16 {
+                (0..n).collect()
+            } else {
+                vec![0, 1, n / 4, n / 2 - 1, n / 2, (3 * n) / 4, n - 2, n - 1]
+            };
+
+            for &culprit_idx in &culprits_to_test {
+                let base = std::env::temp_dir().join(format!(
+                    "pzmod-bisect-sweep-{}-{}-{}",
+                    n,
+                    culprit_idx,
+                    std::process::id()
+                ));
+                let mods = base.join("mods");
+                let off = base.join("mods_off");
+                ensure_dirs(&mods, &off).unwrap();
+
+                let mut mod_names = Vec::new();
+                for i in 0..n {
+                    let name = format!("Mod_{:03}", i);
+                    fs::create_dir_all(mods.join(&name)).unwrap();
+                    mod_names.push(name);
+                }
+                fs::create_dir_all(off.join("Noise_Off_1")).unwrap();
+                fs::create_dir_all(off.join("Noise_Off_2")).unwrap();
+
+                let culprit_name = format!("Mod_{:03}", culprit_idx);
+
+                let start_view = bisect_start_internal(None, &base).unwrap();
+                assert_eq!(start_view["round"], 1);
+                assert_eq!(start_view["running"], true);
+                assert_eq!(start_view["done"], false);
+                assert_eq!(start_view["candidates"].as_array().unwrap().len(), n);
+
+                let max_allowed_marks = (n as f64).log2().ceil() as usize;
+                let mut mark_count = 0;
+
+                loop {
+                    let view = bisect_view_internal(&base).unwrap();
+                    if view["done"].as_bool().unwrap_or(false) {
+                        assert_eq!(
+                            view["suspect"].as_str(),
+                            Some(culprit_name.as_str()),
+                            "Bisect must identify the exact culprit for N={n}, culprit={culprit_name}"
+                        );
+                        break;
+                    }
+
+                    mark_count += 1;
+                    assert!(
+                        mark_count <= max_allowed_marks,
+                        "Bisect mark count ({mark_count}) exceeded ceil(log2({n})) = {max_allowed_marks}"
+                    );
+
+                    let tested: Vec<String> = view["tested"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap().to_string())
+                        .collect();
+
+                    let culprit_in_tested = tested.contains(&culprit_name);
+                    let mark_res = bisect_mark_internal(culprit_in_tested, &base).unwrap();
+
+                    if mark_res["done"].as_bool().unwrap_or(false) {
+                        assert_eq!(
+                            mark_res["suspect"].as_str(),
+                            Some(culprit_name.as_str()),
+                            "Bisect mark result must identify the exact culprit for N={n}, culprit={culprit_name}"
+                        );
+                        break;
+                    }
+                }
+
+                assert!(
+                    mark_count <= max_allowed_marks,
+                    "Total marks ({mark_count}) for N={n} must be <= {max_allowed_marks}"
+                );
+
+                let stop_res = bisect_stop_internal(&base).unwrap();
+                assert_eq!(stop_res["stopped"], true);
+                assert_eq!(stop_res["done"], true);
+                assert!(!base.join(".pzbisect.json").exists());
+
+                for name in &mod_names {
+                    assert!(
+                        mods.join(name).is_dir(),
+                        "Original enabled mod '{name}' must be restored to mods/"
+                    );
+                    assert!(!off.join(name).exists());
+                }
+                assert!(off.join("Noise_Off_1").is_dir());
+                assert!(off.join("Noise_Off_2").is_dir());
+
+                fs::remove_dir_all(&base).ok();
+            }
+        }
+    }
+
+    #[test]
+    fn test_bisect_midway_abort_restores_layout() {
+        let base = std::env::temp_dir().join(format!("pzmod-bisect-midway-{}", std::process::id()));
+        let mods = base.join("mods");
+        let off = base.join("mods_off");
+        ensure_dirs(&mods, &off).unwrap();
+
+        for i in 0..16 {
+            fs::create_dir_all(mods.join(format!("Mod_{:02}", i))).unwrap();
+        }
+        fs::create_dir_all(off.join("QuietMod_01")).unwrap();
+
+        bisect_start_internal(None, &base).unwrap();
+
+        bisect_mark_internal(true, &base).unwrap();
+        bisect_mark_internal(false, &base).unwrap();
+
+        let state = bisect_state_internal(&base).unwrap();
+        assert_eq!(state["round"], 3);
+        assert_eq!(state["done"], false);
+
+        let stop_res = bisect_stop_internal(&base).unwrap();
+        assert_eq!(stop_res["stopped"], true);
+        assert!(!base.join(".pzbisect.json").exists());
+
+        for i in 0..16 {
+            assert!(mods.join(format!("Mod_{:02}", i)).is_dir());
+            assert!(!off.join(format!("Mod_{:02}", i)).exists());
+        }
+        assert!(off.join("QuietMod_01").is_dir());
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+
+    #[test]
     fn cached_listing_serves_fresh_and_stale_and_rejects_block_page() {
         let user = test_root("cache-test");
         let prev_user = std::env::var_os("PZ_USER");
