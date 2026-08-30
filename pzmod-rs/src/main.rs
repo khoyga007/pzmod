@@ -1533,8 +1533,7 @@ fn check_folder(folder: &str) -> Result<String, String> {
 }
 
 fn is_dir(p: &Path) -> bool {
-    // ponytail: mirrors installed_folders() in pzbisect.py, which tests isdir —
-    // a stray FILE of the same name must not read as an installed mod.
+    // A stray file of the same name must not read as an installed mod.
     p.is_dir()
 }
 
@@ -1699,9 +1698,8 @@ fn state() -> Result<State, String> {
 #[derive(Serialize)]
 struct Done {
     ok: bool,
-    // A LIST, not a string: pzmod_gui.py answers /api/enable with
-    // {"log": ["bật X"]} and ui.html calls .map() on it. One string here makes
-    // showLog() throw after a toggle that actually succeeded.
+    // A LIST, not a string: ui.html calls .map() on command logs. One string
+    // here makes showLog() throw after a command that actually succeeded.
     log: Vec<String>,
 }
 
