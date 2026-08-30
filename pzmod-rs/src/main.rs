@@ -469,6 +469,9 @@ fn harvest_cookie(webview: tauri::WebviewWindow, event: tauri::webview::PageLoad
 fn open_steam_window(app: &tauri::AppHandle, url: tauri::Url, visible: bool) -> Result<(), String> {
     use tauri::Manager;
     if let Some(window) = app.get_webview_window(STEAM_WINDOW) {
+        steam_log(&format!(
+            "window: get_webview_window trả Some, navigate+show visible={visible}"
+        ));
         window.navigate(url).map_err(|e| e.to_string())?;
         if visible {
             window.show().map_err(|e| e.to_string())?;
@@ -476,13 +479,19 @@ fn open_steam_window(app: &tauri::AppHandle, url: tauri::Url, visible: bool) -> 
         }
         return Ok(());
     }
-    steam_log(&format!("window: dựng mới, visible={visible}"));
-    tauri::WebviewWindowBuilder::new(app, STEAM_WINDOW, tauri::WebviewUrl::External(url))
-        .title("Steam Workshop")
-        .inner_size(1180.0, 880.0)
-        .visible(visible)
-        .on_page_load(|webview, payload| harvest_cookie(webview, payload.event()))
-        .build()
+    steam_log(&format!(
+        "window: get_webview_window trả None, dựng mới visible={visible}"
+    ));
+    steam_log("window: TRƯỚC build");
+    let result =
+        tauri::WebviewWindowBuilder::new(app, STEAM_WINDOW, tauri::WebviewUrl::External(url))
+            .title("Steam Workshop")
+            .inner_size(1180.0, 880.0)
+            .visible(visible)
+            .on_page_load(|webview, payload| harvest_cookie(webview, payload.event()))
+            .build();
+    steam_log("window: SAU build");
+    result
         .map(|_| ())
         .map_err(|e| format!("Không mở được cửa sổ Steam: {e}"))
 }
