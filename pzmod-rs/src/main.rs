@@ -305,6 +305,21 @@ fn http_agent() -> &'static ureq::Agent {
     })
 }
 
+fn steam_cookie() -> Option<&'static str> {
+    static COOKIE: OnceLock<Option<String>> = OnceLock::new();
+    COOKIE
+        .get_or_init(|| {
+            let path = env_path("LOCALAPPDATA")?
+                .join("pzmod")
+                .join("steam-cookie.txt");
+            let cookie = fs::read_to_string(path).ok()?;
+            let cookie = cookie.trim();
+            (!cookie.is_empty() && !cookie.contains(['\r', '\n', ';']) && cookie.is_ascii())
+                .then(|| cookie.to_owned())
+        })
+        .as_deref()
+}
+
 fn url_encode(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
@@ -482,9 +497,30 @@ fn is_valid_workshop_html(html: &str) -> bool {
     html.contains("filedetails/?id=") && !html.to_lowercase().contains("too many requests")
 }
 
+fn logged_out_of_steam(html: &str) -> bool {
+    html.replace(char::is_whitespace, "")
+        .contains("\"logged_in\":false")
+}
+
+fn steam_cookie_header(url: &str, cookie: &str) -> Option<String> {
+    if !url.starts_with("https://steamcommunity.com/") {
+        return None;
+    }
+    let mut header = format!("steamLoginSecure={cookie}");
+    if let Some(id) = url
+        .strip_prefix(ITEM_URL)
+        .and_then(|id| id.split('&').next())
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        header.push_str(&format!("; wants_mature_content_item_{id}=1"));
+    }
+    Some(header)
+}
+
 fn cache_path(url: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
+    steam_cookie().is_some().hash(&mut hasher);
     paths()
         .1
         .join(".pzmod-cache")
@@ -530,9 +566,11 @@ fn community_error(error: ureq::Error) -> String {
 fn fetch_page(url: &str, is_foreground: bool, gap: Duration) -> Result<String, Blocked> {
     rate_limit_gap(is_foreground, gap);
 
-    let fetched = http_agent()
-        .get(url)
-        .header("User-Agent", UA)
+    let mut request = http_agent().get(url).header("User-Agent", UA);
+    if let Some(cookie) = steam_cookie().and_then(|cookie| steam_cookie_header(url, cookie)) {
+        request = request.header("Cookie", cookie);
+    }
+    let fetched = request
         .call()
         .map_err(community_error)
         .and_then(|mut response| {
@@ -544,6 +582,8 @@ fn fetch_page(url: &str, is_foreground: bool, gap: Duration) -> Result<String, B
         .and_then(|html| {
             if html.to_lowercase().contains("too many requests") {
                 Err(RATE_LIMITED.into())
+            } else if url.starts_with(BROWSE_URL) && logged_out_of_steam(&html) {
+                Err("Steam coi phiên là khách: cookie hết hạn, sai domain (cần steamLoginSecure của steamcommunity.com, không phải store), hoặc IP ra ngoài đã đổi (token gắn IP - bật lại đúng Warp/VPN). Thay steam-cookie.txt rồi mở lại pzmod".into())
             } else if !is_valid_workshop_html(&html) {
                 Err("Steam không trả trang workshop hợp lệ".into())
             } else {
@@ -3086,6 +3126,63 @@ fn main() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn steam_cookie_helpers_scope_auth_and_mature_item_cookie() {
+        assert!(logged_out_of_steam(
+            r#"<script>window.UserConfig = { "logged_in": false };</script>"#
+        ));
+        assert!(!logged_out_of_steam(
+            r#"<script>window.UserConfig = { "logged_in": true };</script>"#
+        ));
+        assert_eq!(
+            steam_cookie_header(&format!("{ITEM_URL}3429790870"), "test-token"),
+            Some("steamLoginSecure=test-token; wants_mature_content_item_3429790870=1".into())
+        );
+        assert_eq!(
+            steam_cookie_header("https://api.steampowered.com/", "test-token"),
+            None
+        );
+    }
+
+    /// Receipt sống, chạy tay: `cargo test --bins live_browse -- --ignored`.
+    /// Cần %LOCALAPPDATA%\pzmod\steam-cookie.txt giữ steamLoginSecure của
+    /// domain steamcommunity.com (claim aud "web:community", KHÔNG phải
+    /// "web:store") và cùng IP ra ngoài với lúc lấy cookie - token nhúng
+    /// ip_subject nên đổi Warp/VPN là phiên chết dù cookie chưa hết hạn.
+    #[test]
+    #[ignore = "gọi Steam thật; chạy tay để lấy receipt"]
+    fn live_browse_shows_mature_mod_with_cookie() {
+        const MATURE_ID: &str = "3429790870";
+        let user = test_root("live-browse");
+        std::env::set_var("PZ_USER", &user);
+        assert!(
+            steam_cookie().is_some(),
+            r"chưa có steam-cookie.txt hợp lệ ở %LOCALAPPDATA%\pzmod"
+        );
+
+        let fields = vec![
+            ("appid".to_string(), APPID.to_string()),
+            ("section".to_string(), "readytouseitems".to_string()),
+            ("browsesort".to_string(), "textsearch".to_string()),
+            ("p".to_string(), "1".to_string()),
+            (
+                "searchtext".to_string(),
+                "Tomb Player Body Overhaul".to_string(),
+            ),
+        ];
+        let url = BROWSE_URL.to_string() + &form_body(&fields);
+        let html = fetch_page(&url, true, BROWSE_GAP).expect("fetch listing");
+
+        assert!(!logged_out_of_steam(&html), "Steam coi phiên là khách");
+        let ids = extract_listing_ids(&html);
+        assert!(
+            ids.iter().any(|id| id == MATURE_ID),
+            "listing thiếu mod mature {MATURE_ID}; {} id trả về",
+            ids.len()
+        );
+        fs::remove_dir_all(&user).ok();
+    }
+
     fn test_root(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "pzmod-rust-{label}-{}-{}",
@@ -3752,7 +3849,6 @@ mod tests {
 
         fs::remove_dir_all(&base).ok();
     }
-
 
     #[test]
     fn cached_listing_serves_fresh_and_stale_and_rejects_block_page() {

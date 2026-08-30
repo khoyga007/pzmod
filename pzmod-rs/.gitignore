@@ -1,4 +1,5 @@
 target/
+steam-cookie.txt
 gen/schemas/
 ui/index.html
 ui/tokens.css
