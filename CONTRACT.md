@@ -37,15 +37,33 @@ STATE = os.path.join(USER, ".pzmod.json")
 
 ## Work split
 
+One lane only. Yang retired the Python lane on 30/08/2026: the product is the
+Tauri GUI, and a parallel CLI twin doubled dev, review and test while producing
+lane-divergence bugs of its own. `pzmod.py`, `pzmod_gui.py` and `pzbisect.py` are
+gone; `main.rs` is the whole app. Cost accepted knowingly: there is no terminal
+surface any more, and `pzmod.py::selftest` (with its live `details(498441420)`
+check) died with it — `cargo test --bins` is the only suite left.
+
 | who | files | scope |
 |---|---|---|
 | Claire | CONTRACT.md, git, integration, final review | this doc; merges; reports to Yang; measures and diagnoses, then hands the fix out |
-| Celine | `pzmod.py`, `pzmod-rs/src/main.rs` | core CLI + its Rust twin: search/info/install/remove/list/update/deps/selftest |
-| Ariel | `pzbisect.py` + `pzmod.py::bisect` hook + Rust `bisect` | enable/disable + binary-search culprit finder + own selftest; plus scrape-budget and rate-limit audit |
-| Selica | `pzmod_gui.py`, `ui.html`, `pzmod-rs/ui/` | web UI: detail sheet, batch install, enable/disable toggles, bisect panel, launch button |
+| Celine | `pzmod-rs/src/main.rs` | core: search/info/install/remove/list/update/deps + cargo tests |
+| Ariel | `main.rs` bisect block (`bisect_*_internal`, ~2726-3031) | enable/disable + binary-search culprit finder; plus scrape-budget and rate-limit audit |
+| Selica | `ui.html` | web UI: detail sheet, batch install, enable/disable toggles, bisect panel, launch button |
 
-The Rust lane had no owner until 30/08/2026, which is how Claire ended up writing
-it alone. It is a hand-kept twin of `pzmod.py`: same owner, same review.
+Celine and Ariel share `main.rs`. Split by block, not by file: Ariel owns the
+bisect functions and their tests, Celine owns the rest. Touching the other's
+block needs a word on the bridge first, same rule as a separate file.
+
+`pzmod-rs/ui/` IS A BUILD ARTIFACT. `sync-ui.py` generates `ui/index.html` from
+`ui.html` and `dev.bat` runs it before every `cargo run`. Never hand-edit
+anything under `pzmod-rs/ui/` — the next build overwrites it. `ui.html` at the
+repo root is the only UI source. (Claire got this wrong on 30/08/2026 and told
+Selica to port a fix into the generated file; it is written down here so nobody
+repeats it.)
+
+`sync-ui.py` and `fetch-fonts.py` stay Python. They are build tooling, not the
+retired lane.
 
 **Nobody edits someone else's file without that owner saying so on the bridge.**
 Claire diagnosing is not Claire implementing: a measurement goes to the bridge
