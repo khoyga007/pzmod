@@ -3406,6 +3406,31 @@ mod tests {
     }
 
     #[test]
+    fn remote_ipc_is_strictly_denied_in_capabilities() {
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("capabilities")
+            .join("default.json");
+        let raw = fs::read_to_string(&manifest_path).expect("read capabilities/default.json");
+        let val: Value = serde_json::from_str(&raw).expect("parse default.json");
+
+        assert!(
+            val.get("remote").is_none(),
+            "Security violation: capabilities/default.json must NOT contain 'remote' permissions"
+        );
+
+        let windows = val["windows"].as_array().expect("windows array");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].as_str(), Some("main"));
+
+        if let Some(webviews) = val.get("webviews").and_then(Value::as_array) {
+            assert!(
+                !webviews.iter().any(|w| w.as_str() == Some("steam")),
+                "Security violation: 'steam' webview must NOT be granted capabilities"
+            );
+        }
+    }
+
+    #[test]
     fn cookie_hygiene_blocks_header_splitting_values() {
         assert!(usable_cookie("76561198365054157%7C%7Ctoken"));
         assert!(!usable_cookie(""));
